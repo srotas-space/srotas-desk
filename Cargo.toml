@@ -1,0 +1,23 @@
+[package]
+name = "srotas-desk"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = "0.4.45"
+dirs = "6.0.0"
+iced = { version = "0.14.0", features = ["tokio", "image", "svg"] }
+image = "0.25"
+open = "5"
+printpdf = "0.7"
+rfd = "0.15"
+sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio", "macros", "chrono"] }
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+
+# Not target-gated: winresource is designed to be a normal build-dependency
+# on every host — it checks the *build target* at runtime inside build.rs
+# (via CARGO_CFG_TARGET_OS) and only does real work when that's "windows",
+# so it's a safe no-op when building for macOS/Linux.
+[build-dependencies]
+winresource = "0.1"

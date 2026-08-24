@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Srotas Desk
+Comment=Hardware shop inventory and billing
+Exec=srotas-desk
+Icon=srotas-desk
+Terminal=false
+Categories=Office;Finance;

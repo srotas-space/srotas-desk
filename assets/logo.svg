@@ -1,0 +1,40 @@
+<svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1050 1050" width="1050" height="1050">
+	<defs>
+		<radialGradient id="g1" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="matrix(525,0,0,525,525,525)">
+			<stop offset="0" stop-color="#ec4899" stop-opacity=".28"/>
+			<stop offset="1" stop-color="#7c3aed" stop-opacity="0"/>
+		</radialGradient>
+		<linearGradient id="g2" x2="1" gradientUnits="userSpaceOnUse" gradientTransform="matrix(903,0,0,903,73.5,73.5)">
+			<stop offset="0" stop-color="#7c3aed"/>
+			<stop offset=".5" stop-color="#ec4899"/>
+			<stop offset="1" stop-color="#fb923c"/>
+		</linearGradient>
+		<linearGradient id="g3" x2="1" gradientUnits="userSpaceOnUse" gradientTransform="matrix(693,0,0,693,178.5,178.5)">
+			<stop offset="0" stop-color="#7c3aed"/>
+			<stop offset=".5" stop-color="#ec4899"/>
+			<stop offset="1" stop-color="#fb923c"/>
+		</linearGradient>
+		<linearGradient id="g4" x2="1" gradientUnits="userSpaceOnUse" gradientTransform="matrix(546,0,0,546,252,252)">
+			<stop offset="0" stop-color="#7c3aed"/>
+			<stop offset=".5" stop-color="#ec4899"/>
+			<stop offset="1" stop-color="#fb923c"/>
+		</linearGradient>
+		<linearGradient id="g5" x2="1" gradientUnits="userSpaceOnUse" gradientTransform="matrix(483,0,0,483,283.5,283.5)">
+			<stop offset="0" stop-color="#7c3aed"/>
+			<stop offset=".5" stop-color="#ec4899"/>
+			<stop offset="1" stop-color="#fb923c"/>
+		</linearGradient>
+	</defs>
+	<style>
+		.s0 { fill: url(#g1) } 
+		.s1 { opacity: .7;fill: none;stroke: url(#g2);stroke-width: 6.6 } 
+		.s2 { opacity: .85;fill: none;stroke: url(#g3);stroke-width: 6.6 } 
+		.s3 { fill: none;stroke: url(#g4);stroke-width: 6.6 } 
+		.s4 { fill: url(#g5) } 
+	</style>
+	<path fill-rule="evenodd" class="s0" d="m525 1050c-290.33 0-525-234.67-525-525 0-290.33 234.67-525 525-525 290.33 0 525 234.67 525 525 0 290.33-234.67 525-525 525z"/>
+	<path fill-rule="evenodd" class="s1" d="m525 976.5c-249.68 0-451.5-201.82-451.5-451.5 0-249.68 201.82-451.5 451.5-451.5 249.68 0 451.5 201.82 451.5 451.5 0 249.68-201.82 451.5-451.5 451.5z"/>
+	<path fill-rule="evenodd" class="s2" d="m525 871.5c-191.61 0-346.5-154.89-346.5-346.5 0-191.61 154.89-346.5 346.5-346.5 191.61 0 346.5 154.89 346.5 346.5 0 191.61-154.89 346.5-346.5 346.5z"/>
+	<path fill-rule="evenodd" class="s3" d="m525 798c-150.97 0-273-122.03-273-273 0-150.97 122.03-273 273-273 150.97 0 273 122.03 273 273 0 150.97-122.03 273-273 273z"/>
+	<path fill-rule="evenodd" class="s4" d="m525 766.5c-133.55 0-241.5-107.95-241.5-241.5 0-133.55 107.95-241.5 241.5-241.5 133.55 0 241.5 107.95 241.5 241.5 0 133.55-107.95 241.5-241.5 241.5z"/>
+</svg>
