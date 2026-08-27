@@ -80,11 +80,33 @@ choose "More info" → "Run anyway".
 
 ### Ubuntu / Linux
 
+`package.sh` must run on an actual Linux machine (or Linux CI) —
+`cargo build --release` just builds for whatever OS it's invoked on, so
+running this script directly on macOS silently produces a macOS binary
+wrapped in Linux-shaped packaging. It looks fine until someone on Ubuntu
+actually tries to run it.
+
+On Linux:
+
 ```bash
 ./packaging/linux/package.sh
 ```
 
-Produces `dist/linux/srotas-desk-linux.tar.gz`. On the target machine:
+From macOS (or any non-Linux host), cross-build via Docker instead — no
+Linux machine needed:
+
+```bash
+./packaging/linux/package-docker.sh
+```
+
+This builds inside an Ubuntu 22.04 container (Docker Desktop must be
+running) with the same apt packages the CI job installs, so the output
+matches what CI would produce. It's slower than a native build on Apple
+Silicon (the container runs under emulation to produce a real x86_64
+binary), but only needs to run occasionally for a release.
+
+Either way it produces `dist/linux/srotas-desk-linux.tar.gz`. On the
+target machine:
 
 ```bash
 tar xzf srotas-desk-linux.tar.gz
