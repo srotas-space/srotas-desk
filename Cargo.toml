@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+base64 = "0.22"
 chrono = "0.4.45"
 dirs = "6.0.0"
+ed25519-dalek = "2"
 iced = { version = "0.14.0", features = ["tokio", "image", "svg"] }
 image = "0.25"
 open = "5"
@@ -14,6 +16,7 @@ rfd = "0.15"
 sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio", "macros", "chrono"] }
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+uuid = { version = "1", features = ["v4"] }
 
 # Not target-gated: winresource is designed to be a normal build-dependency
 # on every host — it checks the *build target* at runtime inside build.rs

@@ -1,11 +1,15 @@
 mod backup;
+mod bills;
 mod items;
+mod license;
 mod reports;
 mod shop;
 mod transactions;
 
 pub use backup::*;
+pub use bills::*;
 pub use items::*;
+pub use license::*;
 pub use reports::*;
 pub use shop::*;
 pub use transactions::*;

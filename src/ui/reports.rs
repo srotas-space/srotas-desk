@@ -26,6 +26,22 @@ pub struct ReportsState {
     pub rows: Vec<TransactionHistoryRow>,
 }
 
+impl ReportsState {
+    pub fn set_field(&mut self, field: Field, value: String) {
+        match field {
+            Field::From => self.from = value,
+            Field::To => self.to = value,
+        }
+    }
+
+    pub fn get_field(&self, field: Field) -> String {
+        match field {
+            Field::From => self.from.clone(),
+            Field::To => self.to.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Loaded {
     pub stock_value_paise: i64,

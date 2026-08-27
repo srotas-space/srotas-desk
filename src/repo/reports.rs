@@ -58,7 +58,7 @@ pub async fn sales_report(
              t.timestamp AS timestamp \
          FROM transactions t \
          JOIN items i ON i.id = t.item_id \
-         WHERE t.type = 'sell' \
+         WHERE t.type = 'sell' AND t.deleted = 0 \
            AND (? IS NULL OR t.item_id = ?) \
            AND (? IS NULL OR t.timestamp >= ?) \
            AND (? IS NULL OR t.timestamp <= ?) \
@@ -133,7 +133,8 @@ pub async fn transaction_history(
              t.timestamp AS timestamp \
          FROM transactions t \
          JOIN items i ON i.id = t.item_id \
-         WHERE (? IS NULL OR t.type = ?) \
+         WHERE t.deleted = 0 \
+           AND (? IS NULL OR t.type = ?) \
            AND (? IS NULL OR t.item_id = ?) \
            AND (? IS NULL OR t.timestamp >= ?) \
            AND (? IS NULL OR t.timestamp <= ?) \

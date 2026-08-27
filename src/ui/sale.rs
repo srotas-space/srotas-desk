@@ -1,5 +1,6 @@
 use iced::widget::{button, column, combo_box, container, row, scrollable, text, text_input};
 use iced::{Element, Length, Task};
+use std::path::PathBuf;
 
 use super::{Message, State};
 use crate::money;
@@ -15,6 +16,7 @@ pub enum Field {
 
 #[derive(Debug, Clone, Default)]
 pub struct SaleForm {
+    pub editing_id: Option<i64>,
     pub item: Option<ItemOption>,
     pub qty: String,
     pub price: String,
@@ -27,6 +29,13 @@ impl SaleForm {
             Field::Price => self.price = value,
         }
     }
+
+    pub fn get_field(&self, field: Field) -> String {
+        match field {
+            Field::Qty => self.qty.clone(),
+            Field::Price => self.price.clone(),
+        }
+    }
 }
 
 pub fn select_item(state: &mut State, option: ItemOption) {
@@ -34,6 +43,21 @@ pub fn select_item(state: &mut State, option: ItemOption) {
         state.sale_form.price = money::paise_to_input(item.sell_price_paise);
     }
     state.sale_form.item = Some(option);
+}
+
+/// Loads a past sale into the form for editing — pre-fills item/qty/price
+/// and switches Submit over to `edit_sale`.
+pub fn load_for_edit(state: &mut State, row: TransactionHistoryRow) {
+    state.sale_form.editing_id = Some(row.id);
+    state.sale_form.item = Some(ItemOption { id: row.item_id, name: row.item_name });
+    state.sale_form.qty = format!("{}", row.qty);
+    state.sale_form.price = money::paise_to_input(row.price_paise);
+    state.sale_viewing = None;
+}
+
+pub fn cancel_edit(state: &mut State) {
+    state.sale_form = SaleForm::default();
+    state.status = None;
 }
 
 pub fn submit(state: &mut State) -> Task<Message> {
@@ -53,9 +77,15 @@ pub fn submit(state: &mut State) -> Task<Message> {
     let Some(pool) = state.pool.clone() else {
         return Task::none();
     };
+    let editing_id = form.editing_id;
 
     Task::perform(
-        async move { crate::repo::record_sale(&pool, item.id, qty, price_paise, chrono::Utc::now()).await },
+        async move {
+            match editing_id {
+                Some(id) => crate::repo::edit_sale(&pool, id, item.id, qty, price_paise).await,
+                None => crate::repo::record_sale(&pool, item.id, qty, price_paise, chrono::Utc::now()).await,
+            }
+        },
         |result| Message::SaleRecorded(result.map_err(|e| e.to_string())),
     )
 }
@@ -69,7 +99,75 @@ pub fn load_recent(pool: sqlx::SqlitePool) -> Task<Message> {
     )
 }
 
+/// Re-fetches the sale fresh rather than trusting whatever's on screen —
+/// same reasoning as the Reports/Bills PDF export. `open_after` controls
+/// whether this is "Print" (opens the file, ready to print) or "Download"
+/// (just saves it and reports where).
+pub fn export_pdf(state: &State, id: i64, open_after: bool) -> Task<Message> {
+    let Some(pool) = state.pool.clone() else {
+        return Task::done(Message::SalePdfReady(Err("database is not ready yet".into())));
+    };
+    let shop_name = state.shop.as_ref().map(|s| s.shop_name.clone()).unwrap_or_else(|| "Srotas Desk".to_string());
+
+    Task::perform(
+        async move {
+            let sale = crate::repo::get_sale(&pool, id).await.map_err(|e| e.to_string())?;
+            let bytes = build_pdf_bytes(&shop_name, &sale)?;
+            save(bytes, sale.id, open_after).await
+        },
+        move |result| Message::SalePdfReady(result.map(|path| (path, open_after))),
+    )
+}
+
+async fn save(bytes: Vec<u8>, id: i64, open_after: bool) -> Result<PathBuf, String> {
+    let dir = dirs::download_dir().or_else(dirs::document_dir).ok_or("could not find a Downloads folder on this computer")?;
+    let path = dir.join(format!("srotas-sale-{id}.pdf"));
+
+    tokio::fs::write(&path, &bytes).await.map_err(|e| e.to_string())?;
+    if open_after {
+        open::that(&path).map_err(|e| format!("sale receipt saved, but couldn't open it: {e}"))?;
+    }
+
+    Ok(path)
+}
+
+fn build_pdf_bytes(shop_name: &str, sale: &TransactionHistoryRow) -> Result<Vec<u8>, String> {
+    let mut w = crate::pdf::Writer::new(&format!("{shop_name} - Sale #{}", sale.id))?;
+
+    w.line(shop_name, 18.0, true);
+    w.line(&format!("Sale #{}", sale.id), 14.0, true);
+    w.line(&format!("Date: {}", sale.timestamp.format("%d %b %Y %H:%M")), 10.0, false);
+    w.gap(6.0);
+
+    const ITEM_X: f32 = crate::pdf::LEFT_MM;
+    const QTY_X: f32 = 100.0;
+    const PRICE_X: f32 = 130.0;
+    const TOTAL_X: f32 = 160.0;
+
+    w.row(&[("Item", ITEM_X), ("Qty", QTY_X), ("Price", PRICE_X), ("Total", TOTAL_X)], 10.0, true);
+
+    let total_paise = (sale.price_paise as f64 * sale.qty).round() as i64;
+    w.row(
+        &[
+            (sale.item_name.as_str(), ITEM_X),
+            (&format!("{:.1}", sale.qty), QTY_X),
+            (&money::format_paise_ascii(sale.price_paise), PRICE_X),
+            (&money::format_paise_ascii(total_paise), TOTAL_X),
+        ],
+        10.0,
+        false,
+    );
+    w.gap(6.0);
+    w.line(&format!("Total: {}", money::format_paise_ascii(total_paise)), 14.0, true);
+
+    w.finish()
+}
+
 pub fn view(state: &State) -> Element<'_, Message> {
+    if let Some(sale) = &state.sale_viewing {
+        return detail_view(state, sale);
+    }
+
     let form = &state.sale_form;
 
     let selected_item = form.item.as_ref().and_then(|sel| state.items.iter().find(|i| i.id == sel.id));
@@ -83,18 +181,26 @@ pub fn view(state: &State) -> Element<'_, Message> {
     .padding(10)
     .width(Length::Fixed(260.0));
 
-    let form_fields = column![
-        text("Item (Billing)").size(20),
-        row![
-            labeled("Item", item_picker),
-            labeled("Quantity", text_input("e.g. 2", &form.qty).on_input(|v| Message::SaleFieldChanged(Field::Qty, v)).padding(10).width(Length::Fixed(120.0))),
-            labeled("Sell Price (₹) per unit", text_input("120.00", &form.price).on_input(|v| Message::SaleFieldChanged(Field::Price, v)).padding(10).width(Length::Fixed(140.0))),
-            button(text("Sell Stock").size(15)).style(theme::accent_button).padding([10, 24]).on_press(Message::SubmitSale),
-        ]
-        .spacing(theme::SPACE_MD)
-        .align_y(iced::Alignment::End),
+    let title = match form.editing_id {
+        Some(id) => format!("Edit Sale #{id}"),
+        None => "Item (Billing)".to_string(),
+    };
+
+    let mut actions = row![
+        labeled("Item", item_picker),
+        labeled("Quantity", text_input("e.g. 2", &form.qty).on_input(|v| Message::SaleFieldChanged(Field::Qty, v)).padding(10).width(Length::Fixed(120.0))),
+        labeled("Sell Price (₹) per unit", text_input("120.00", &form.price).on_input(|v| Message::SaleFieldChanged(Field::Price, v)).padding(10).width(Length::Fixed(140.0))),
+        button(text(if form.editing_id.is_some() { "Save" } else { "Sell Stock" }).size(15)).style(theme::accent_button).padding([10, 24]).on_press(Message::SubmitSale),
     ]
-    .spacing(theme::SPACE_SM);
+    .spacing(theme::SPACE_MD)
+    .align_y(iced::Alignment::End);
+    if form.editing_id.is_some() {
+        actions = actions.push(button(text("Cancel").size(15)).style(theme::secondary_button).padding([10, 24]).on_press(Message::CancelSaleEdit));
+    } else {
+        actions = actions.push(button(text("Billings").size(15)).style(theme::secondary_button).padding([10, 24]).on_press(Message::ShopTabSelected(super::ShopTab::Billings)));
+    }
+
+    let form_fields = column![text(title).size(20), actions].spacing(theme::SPACE_SM);
 
     // Always visible — defaults to zero until an item is picked, then
     // reflects that item's real stock/buy/sell figures.
@@ -126,12 +232,12 @@ pub fn view(state: &State) -> Element<'_, Message> {
     let page = state.sale_page.min(page_count - 1);
     let start = page * PAGE_SIZE;
 
-    let mut history = column![text("Recent Sales").size(16)].spacing(6);
+    let mut history = column![text("Sales History").size(16)].spacing(6);
     if total == 0 {
         history = history.push(text("No sales recorded yet.").size(13));
     }
     for row in state.recent_sales.iter().skip(start).take(PAGE_SIZE) {
-        history = history.push(history_row(row));
+        history = history.push(history_row(row, state.sale_confirming_delete_id == Some(row.id)));
     }
 
     let range_label = if total == 0 {
@@ -172,18 +278,82 @@ fn stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     .into()
 }
 
-fn history_row(row: &TransactionHistoryRow) -> Element<'_, Message> {
+fn history_row(row: &TransactionHistoryRow, confirming_delete: bool) -> Element<'_, Message> {
+    let delete_label = if confirming_delete { "Confirm?" } else { "Delete" };
+
     container(
         iced::widget::row![
             text(&row.item_name).width(Length::FillPortion(3)),
             text(format!("{:.1}", row.qty)).width(Length::FillPortion(1)),
             text(money::format_paise(row.price_paise)).width(Length::FillPortion(1)),
             text(row.timestamp.format("%d %b %H:%M").to_string()).width(Length::FillPortion(2)),
+            row![
+                button(text("View").size(12)).style(theme::secondary_button).padding([6, 10]).on_press(Message::OpenSaleView(row.id)),
+                button(text("Edit").size(12)).style(theme::secondary_button).padding([6, 10]).on_press(Message::OpenSaleEdit(row.id)),
+                button(text("Print").size(12)).style(theme::secondary_button).padding([6, 10]).on_press(Message::PrintSalePressed(row.id)),
+                button(text("Download").size(12)).style(theme::secondary_button).padding([6, 10]).on_press(Message::DownloadSalePressed(row.id)),
+                button(text(delete_label).size(12)).style(theme::danger_button).padding([6, 10]).on_press(Message::DeleteSalePressed(row.id)),
+            ]
+            .spacing(6)
+            .width(Length::FillPortion(5)),
         ]
-        .spacing(8),
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
     )
     .padding(6)
     .into()
+}
+
+const THUMBNAIL_SIZE: f32 = 48.0;
+
+fn detail_view<'a>(state: &'a State, sale: &'a TransactionHistoryRow) -> Element<'a, Message> {
+    let total_paise = (sale.price_paise as f64 * sale.qty).round() as i64;
+
+    let item_row: Element<'_, Message> = match state.item_thumbnails.get(&sale.item_id) {
+        Some(bytes) => row![
+            iced::widget::image::Image::new(iced::widget::image::Handle::from_bytes(bytes.clone()))
+                .width(THUMBNAIL_SIZE)
+                .height(THUMBNAIL_SIZE)
+                .content_fit(iced::ContentFit::Cover),
+            detail_row("Item", sale.item_name.clone()),
+        ]
+        .spacing(theme::SPACE_SM)
+        .align_y(iced::Alignment::Center)
+        .into(),
+        None => detail_row("Item", sale.item_name.clone()),
+    };
+
+    let body = column![
+        text(format!("Sale #{}", sale.id)).size(22),
+        text(sale.timestamp.format("%d %b %Y %H:%M").to_string()).size(13).color(theme::MUTED_TEXT),
+        item_row,
+        detail_row("Quantity", format!("{:.1}", sale.qty)),
+        detail_row("Price", money::format_paise(sale.price_paise)),
+        row![
+            text("Total").width(Length::Fixed(140.0)).size(18),
+            text(money::format_paise(total_paise)).size(18).font(theme::BOLD).color(theme::VIOLET),
+        ],
+        row![
+            button(text("Edit").size(15)).style(theme::primary_button).padding([10, 24]).on_press(Message::OpenSaleEdit(sale.id)),
+            button(text("Print").size(15)).style(theme::success_button).padding([10, 24]).on_press(Message::PrintSalePressed(sale.id)),
+            button(text("Download").size(15)).style(theme::secondary_button).padding([10, 24]).on_press(Message::DownloadSalePressed(sale.id)),
+            button(text("Back").size(15)).style(theme::secondary_button).padding([10, 24]).on_press(Message::CloseSaleView),
+        ]
+        .spacing(theme::SPACE_MD),
+    ]
+    .spacing(theme::SPACE_MD)
+    .max_width(560);
+
+    container(container(body).style(theme::card).padding(theme::SPACE_LG))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(theme::SPACE_MD)
+        .align_x(iced::Alignment::Center)
+        .into()
+}
+
+fn detail_row<'a>(label: &'a str, value: String) -> Element<'a, Message> {
+    row![text(label).size(14).width(Length::Fixed(140.0)), text(value).size(14)].into()
 }
 
 fn labeled<'a>(label: &'a str, widget: impl Into<Element<'a, Message>>) -> Element<'a, Message> {

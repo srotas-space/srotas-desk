@@ -31,15 +31,16 @@ pub async fn add_item(
     low_stock_threshold: f64,
     description: &str,
     image: Option<&[u8]>,
+    gst_rate_bp: Option<i64>,
 ) -> Result<Item, RepoError> {
     if name_taken(pool, name, None).await? {
         return Err(RepoError::DuplicateItemName { name: name.to_string() });
     }
 
     let item = sqlx::query_as::<_, Item>(
-        "INSERT INTO items (name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold, description, image) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
-         RETURNING id, name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold, deleted, description, (image IS NOT NULL) AS has_image",
+        "INSERT INTO items (name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold, description, image, gst_rate_bp) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         RETURNING id, name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold, deleted, description, (image IS NOT NULL) AS has_image, gst_rate_bp",
     )
     .bind(name)
     .bind(buy_price_paise)
@@ -49,6 +50,7 @@ pub async fn add_item(
     .bind(low_stock_threshold)
     .bind(description)
     .bind(image)
+    .bind(gst_rate_bp)
     .fetch_one(pool)
     .await?;
 
@@ -69,6 +71,7 @@ pub async fn edit_item(
     low_stock_threshold: f64,
     description: &str,
     image: Option<&[u8]>,
+    gst_rate_bp: Option<i64>,
 ) -> Result<Item, RepoError> {
     if name_taken(pool, name, Some(id)).await? {
         return Err(RepoError::DuplicateItemName { name: name.to_string() });
@@ -77,9 +80,9 @@ pub async fn edit_item(
     let item = sqlx::query_as::<_, Item>(
         "UPDATE items \
          SET name = ?, buy_price_paise = ?, sell_price_paise = ?, unit = ?, low_stock_threshold = ?, \
-             description = ?, image = ? \
+             description = ?, image = ?, gst_rate_bp = ? \
          WHERE id = ? AND deleted = 0 \
-         RETURNING id, name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold, deleted, description, (image IS NOT NULL) AS has_image",
+         RETURNING id, name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold, deleted, description, (image IS NOT NULL) AS has_image, gst_rate_bp",
     )
     .bind(name)
     .bind(buy_price_paise)
@@ -88,6 +91,7 @@ pub async fn edit_item(
     .bind(low_stock_threshold)
     .bind(description)
     .bind(image)
+    .bind(gst_rate_bp)
     .bind(id)
     .fetch_optional(pool)
     .await?;
@@ -112,7 +116,7 @@ pub async fn delete_item(pool: &SqlitePool, id: i64) -> Result<(), RepoError> {
 pub async fn list_items(pool: &SqlitePool) -> Result<Vec<Item>, RepoError> {
     let items = sqlx::query_as::<_, Item>(
         "SELECT id, name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold, deleted, \
-                description, (image IS NOT NULL) AS has_image \
+                description, (image IS NOT NULL) AS has_image, gst_rate_bp \
          FROM items WHERE deleted = 0 ORDER BY name",
     )
     .fetch_all(pool)
@@ -131,7 +135,7 @@ pub async fn search_items(pool: &SqlitePool, query: &str) -> Result<Vec<Item>, R
 
     let items = sqlx::query_as::<_, Item>(
         "SELECT id, name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold, deleted, \
-                description, (image IS NOT NULL) AS has_image \
+                description, (image IS NOT NULL) AS has_image, gst_rate_bp \
          FROM items WHERE deleted = 0 AND name LIKE ? ESCAPE '\\' ORDER BY name",
     )
     .bind(pattern)

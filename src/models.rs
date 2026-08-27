@@ -54,6 +54,9 @@ pub struct Item {
     pub deleted: bool,
     pub description: String,
     pub has_image: bool,
+    /// Basis points (1800 = 18.00%). `None` means "use the shop's default
+    /// GST rate" rather than "0% GST" — see `ShopProfile::gst_rate_bp`.
+    pub gst_rate_bp: Option<i64>,
 }
 
 impl Item {
@@ -85,4 +88,50 @@ pub struct ShopProfile {
     pub address: String,
     pub pin: Option<String>,
     pub created_at: DateTime<Utc>,
+    pub has_logo: bool,
+    /// Default GST rate in basis points (1800 = 18.00%), used for any item
+    /// that doesn't set its own override.
+    pub gst_rate_bp: i64,
+    pub gstin: Option<String>,
+}
+
+/// One row of the bills list — enough to render a history row without
+/// pulling in every line item.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct BillSummary {
+    pub id: i64,
+    pub item_count: i64,
+    pub total_paise: i64,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// One line of a bill. `item_name` is captured at billing time (not joined
+/// live from `items`), so a bill still reads correctly even if the item is
+/// later renamed or deleted.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct BillLine {
+    pub id: i64,
+    pub item_id: i64,
+    pub item_name: String,
+    pub qty: f64,
+    pub price_paise: i64,
+    pub line_total_paise: i64,
+    /// The GST rate actually applied to this line, snapshotted at billing
+    /// time (basis points, 1800 = 18.00%) — independent of the item's or
+    /// shop's *current* rate, same reasoning as `price_paise`.
+    pub gst_rate_bp: i64,
+    pub cgst_paise: i64,
+    pub sgst_paise: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BillDetail {
+    pub id: i64,
+    pub subtotal_paise: i64,
+    pub discount_paise: i64,
+    pub cgst_paise: i64,
+    pub sgst_paise: i64,
+    pub total_paise: i64,
+    pub timestamp: DateTime<Utc>,
+    pub lines: Vec<BillLine>,
 }

@@ -35,6 +35,17 @@ impl RegisterForm {
             Field::PinConfirm => self.pin_confirm = value,
         }
     }
+
+    pub fn get_field(&self, field: Field) -> String {
+        match field {
+            Field::ShopName => self.shop_name.clone(),
+            Field::OwnerName => self.owner_name.clone(),
+            Field::Phone => self.phone.clone(),
+            Field::Address => self.address.clone(),
+            Field::Pin => self.pin.clone(),
+            Field::PinConfirm => self.pin_confirm.clone(),
+        }
+    }
 }
 
 struct Parsed {

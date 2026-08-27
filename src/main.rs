@@ -4,6 +4,7 @@
 #![windows_subsystem = "windows"]
 
 mod db;
+mod license;
 mod models;
 mod money;
 mod pdf;

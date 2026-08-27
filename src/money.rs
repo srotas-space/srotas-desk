@@ -48,6 +48,14 @@ pub fn format_paise_ascii(paise: i64) -> String {
     format!("{sign}Rs. {}.{:02}", paise_abs / 100, paise_abs % 100)
 }
 
+/// Formats a GST rate stored in basis points (1800 = 18.00%) for display,
+/// e.g. `1800` -> "18.00%". Basis points here follow the same "hundredths"
+/// convention as paise, so `rupees_to_paise`/`paise_to_input` double as the
+/// rate parser/pre-fill formatter — see `ui::items`/`ui::settings`.
+pub fn format_gst_rate_bp(bp: i64) -> String {
+    format!("{}.{:02}%", bp / 100, bp.unsigned_abs() % 100)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
