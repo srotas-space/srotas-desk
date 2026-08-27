@@ -1,8 +1,13 @@
-use iced::widget::{button, column, container, row, svg, text, text_input};
+use iced::widget::{button, checkbox, column, container, row, svg, text, text_input};
 use iced::{Element, Length, Task};
 
 use super::{Message, State};
 use crate::ui::theme;
+
+/// Where the Terms & Conditions checkbox below links out to — kept in sync
+/// by hand with `business/fe/open-source`'s `/products/desk/tnc` page;
+/// there's no shared source of truth between the two projects.
+pub const TNC_URL: &str = "https://open-source.srotas.space/products/desk/tnc";
 
 #[derive(Debug, Clone, Default)]
 pub struct ActivationState {
@@ -10,6 +15,7 @@ pub struct ActivationState {
     /// the shopkeeper can send it to whoever issues their license key.
     pub device_id: String,
     pub key_input: String,
+    pub agreed_to_tnc: bool,
     pub error: Option<String>,
 }
 
@@ -89,6 +95,13 @@ pub fn view(state: &State) -> Element<'_, Message> {
     ]
     .spacing(theme::SPACE_SM);
 
+    let tnc_row = row![
+        checkbox::Checkbox::new(activation.agreed_to_tnc).label("I agree to the").on_toggle(Message::ActivationTncToggled),
+        button(text("Terms & Conditions").size(14)).style(theme::link_button).padding(0).on_press(Message::OpenTnc),
+    ]
+    .spacing(theme::SPACE_SM)
+    .align_y(iced::Alignment::Center);
+
     let mut fields = column![
         text("Activate Srotas Desk").size(26),
         text("This computer's Device ID — send it to us to receive your license key.").size(14).color(theme::MUTED_TEXT),
@@ -100,7 +113,11 @@ pub fn view(state: &State) -> Element<'_, Message> {
                 .padding(10)
                 .size(15),
         ),
-        button(text("Activate").size(16)).style(theme::primary_button).padding([12, 24]).on_press(Message::SubmitActivation),
+        tnc_row,
+        button(text("Activate").size(16))
+            .style(theme::primary_button)
+            .padding([12, 24])
+            .on_press_maybe(activation.agreed_to_tnc.then_some(Message::SubmitActivation)),
     ]
     .spacing(theme::SPACE_MD)
     .max_width(480);

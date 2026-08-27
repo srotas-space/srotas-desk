@@ -94,6 +94,21 @@ pub fn danger_button(theme: &Theme, status: button::Status) -> button::Style {
     rounded_button(p.danger.base, p.danger.strong, status)
 }
 
+/// A plain-text, no-background button styled like a hyperlink — for
+/// actions that open something external (e.g. "Terms & Conditions")
+/// rather than performing an in-app action, so it doesn't compete
+/// visually with real buttons.
+pub fn link_button(_theme: &Theme, status: button::Status) -> button::Style {
+    let color = if status == button::Status::Hovered { VIOLET } else { VIOLET.scale_alpha(0.85) };
+    button::Style {
+        background: None,
+        text_color: color,
+        border: Border::default(),
+        shadow: Shadow::default(),
+        snap: false,
+    }
+}
+
 /// The "Sell" action button — brand pink, so billing a sale reads as a
 /// visually distinct action from stocking-in (green) at a glance.
 pub fn accent_button(_theme: &Theme, status: button::Status) -> button::Style {

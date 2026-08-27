@@ -292,6 +292,8 @@ pub enum Message {
     DbReady(Result<SqlitePool, String>),
     LicenseChecked(Result<activation::Outcome, String>),
     ActivationKeyChanged(String),
+    ActivationTncToggled(bool),
+    OpenTnc,
     CopyDeviceId,
     SubmitActivation,
     ActivationCompleted(Result<(), String>),
@@ -519,6 +521,16 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::ActivationKeyChanged(value) => {
             push_edit(state, EditableField::ActivationKey, value);
+            Task::none()
+        }
+        Message::ActivationTncToggled(agreed) => {
+            state.activation.agreed_to_tnc = agreed;
+            Task::none()
+        }
+        Message::OpenTnc => {
+            if let Err(e) = open::that(activation::TNC_URL) {
+                state.activation.error = Some(format!("could not open link: {e}"));
+            }
             Task::none()
         }
         Message::CopyDeviceId => iced::clipboard::write(state.activation.device_id.clone()),
