@@ -142,3 +142,9 @@ on Linux). It survives restarts, updates, and reinstalls of the app
 itself — the only real risk is disk failure, which is what the in-app
 **Backup** screen (under Inventory) is for. Back up regularly to a
 pendrive or a folder that syncs to cloud storage.
+
+## Installing / uninstalling a downloaded release
+
+See `INSTALL.md` for end-user install and uninstall steps on each
+platform (this section covers building from source instead).
+

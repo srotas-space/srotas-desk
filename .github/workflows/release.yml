@@ -6,6 +6,12 @@ on:
       - "v*"
   workflow_dispatch: {}
 
+# softprops/action-gh-release needs write access to create the release and
+# upload assets — without this, the default GITHUB_TOKEN is read-only
+# (repo default since Feb 2023) and the release job fails with a 403.
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
