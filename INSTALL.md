@@ -1,7 +1,7 @@
 # Installing / uninstalling Srotas Desk
 
 For end users downloading a release from
-`open-source.srotas.space/products/downloads` (or directly from
+`open-source.srotas.space/products/desk/downloads` (or directly from
 [GitHub Releases](https://github.com/srotas-space/srotas-desk/releases/latest)).
 If you're building from source instead, see `README.md`.
 

@@ -87,7 +87,7 @@ locally before you tag anything).
    check (not just that the file exists), see `INSTALL.md`.
 
 7. **Verify the downloads page** picks it up —
-   `open-source.srotas.space/products/downloads` — the three buttons
+   `open-source.srotas.space/products/desk/downloads` — the three buttons
    should download real files. Nothing to redeploy on the website's side;
    it links at `/releases/latest/...`, which now resolves.
 
