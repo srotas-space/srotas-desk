@@ -589,11 +589,20 @@ fn detail_view<'a>(item: &'a Item, image_bytes: Option<&'a [u8]>, default_gst_bp
         text(&item.description).size(14).into()
     };
 
+    let stats_panel = container(
+        row![
+            stat_tile("Stock", format!("{:.1} {}", item.stock_qty, item.unit)),
+            stat_tile("Buy", money::format_paise(item.buy_price_paise)),
+            stat_tile("Sell", money::format_paise(item.sell_price_paise)),
+        ]
+        .spacing(theme::SPACE_LG),
+    )
+    .style(theme::card)
+    .padding(theme::SPACE_MD);
+
     let body = column![
         row![photo, column![text(&item.name).size(24), description].spacing(theme::SPACE_SM)].spacing(theme::SPACE_LG),
-        detail_row("Stock", format!("{:.1} {}", item.stock_qty, item.unit)),
-        detail_row("Buy price", money::format_paise(item.buy_price_paise)),
-        detail_row("Sell price", money::format_paise(item.sell_price_paise)),
+        stats_panel,
         detail_row("Low-stock alert below", format!("{:.1} {}", item.low_stock_threshold, item.unit)),
         detail_row(
             "GST rate",
@@ -656,6 +665,19 @@ fn purchase_view(form: &PurchaseForm) -> Element<'_, Message> {
 
 fn detail_row<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     row![text(label).size(14).width(Length::Fixed(180.0)), text(value).size(14)].into()
+}
+
+/// Same stat-tile treatment as the Sell screen's Stock/Buy/Sell panel
+/// (`ui::sale::stat`) — kept as a separate copy rather than shared since
+/// iced's per-module view functions aren't set up as a shared component
+/// library, same as `labeled` being duplicated across a few of these files.
+fn stat_tile<'a>(label: &'a str, value: String) -> Element<'a, Message> {
+    column![
+        text(label.to_uppercase()).size(12).color(theme::MUTED_TEXT),
+        text(value).size(20).font(theme::BOLD).color(theme::VIOLET),
+    ]
+    .spacing(4)
+    .into()
 }
 
 fn labeled<'a>(label: &'a str, widget: impl Into<Element<'a, Message>>) -> Element<'a, Message> {

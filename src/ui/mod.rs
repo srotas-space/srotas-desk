@@ -287,6 +287,8 @@ pub enum Message {
     NoOp,
     UndoRequested,
     RedoRequested,
+    FocusNext,
+    FocusPrevious,
     DbReady(Result<SqlitePool, String>),
     LicenseChecked(Result<activation::Outcome, String>),
     ActivationKeyChanged(String),
@@ -444,6 +446,16 @@ fn keyboard_shortcuts() -> iced::Subscription<Message> {
         let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
             return Message::NoOp;
         };
+
+        // Tab/Shift+Tab move focus between fields — text_input doesn't do
+        // this on its own (unlike a browser's native tab order), so it has
+        // to be wired up explicitly via `operation::focus_next/previous`
+        // in `update` below. No modifier requirement, unlike the
+        // undo/redo shortcuts past this point.
+        if key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab) {
+            return if modifiers.shift() { Message::FocusPrevious } else { Message::FocusNext };
+        }
+
         if !(modifiers.control() || modifiers.logo()) {
             return Message::NoOp;
         }
@@ -475,6 +487,8 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             redo(state);
             Task::none()
         }
+        Message::FocusNext => iced::widget::operation::focus_next(),
+        Message::FocusPrevious => iced::widget::operation::focus_previous(),
         Message::DbReady(Ok(pool)) => {
             state.settings = crate::settings::load();
             let for_license = pool.clone();
