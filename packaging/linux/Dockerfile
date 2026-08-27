@@ -12,7 +12,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates build-essential pkg-config \
     libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev \
     libxcursor-dev libgl1-mesa-dev libfontconfig1-dev libgtk-3-dev \
+    libxkbcommon-x11-0 \
     && rm -rf /var/lib/apt/lists/*
+# libxkbcommon-x11-0 (note: no -dev, it's not needed to build — winit's
+# xkbcommon-dl crate dlopen()s libxkbcommon-x11.so at runtime instead of
+# linking it) is here so this image can also *run* the built binary for
+# local X11-forwarded testing (see the docker run example in INSTALL.md),
+# not because compiling needs it. A real end user's Ubuntu Desktop
+# normally already has this as part of its X11/Xkb stack; a bare/minimal
+# install might not.
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 ENV PATH="/root/.cargo/bin:${PATH}"

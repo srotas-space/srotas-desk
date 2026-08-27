@@ -91,6 +91,58 @@ locally before you tag anything).
    should download real files. Nothing to redeploy on the website's side;
    it links at `/releases/latest/...`, which now resolves.
 
+## Testing the actual app locally (not just that it builds)
+
+A successful `cargo build`/CI run only proves the binary compiles — it
+says nothing about whether the GUI actually launches and renders. From
+a Mac, without a real machine of that OS:
+
+**Linux — works, via Docker + XQuartz.** One-time setup:
+
+```bash
+brew install --cask xquartz   # if not already installed
+open -a XQuartz
+# XQuartz → Preferences → Security → "Allow connections from network
+# clients" — the checkbox writes to the WRONG preference domain on
+# some XQuartz versions, so set it directly instead, then restart:
+defaults write org.xquartz.X11 nolisten_tcp -bool false
+osascript -e 'tell application "XQuartz" to quit'; open -a XQuartz
+```
+
+Then, per test run:
+
+```bash
+xhost + 127.0.0.1
+docker run --rm --platform linux/amd64 \
+  -e DISPLAY=host.docker.internal:0 \
+  -v "$PWD/dist/linux/srotas-desk":/app \
+  srotas-desk-linux-builder \
+  /app/srotas-desk
+```
+
+(`srotas-desk-linux-builder` is the image `package-docker.sh` builds —
+run that first if you haven't. `dist/linux/srotas-desk/` is its output
+dir, from either that script or `package.sh`.)
+
+**Windows — no lightweight option actually works.** All tried and
+ruled out:
+
+- `wine-stable`, Whisky, `wine-crossover` — all deprecated/removed from
+  Homebrew as of 2026 (unsigned/unmaintained).
+- Wine installed *inside* the Linux Docker container above (sidesteps
+  macOS Gatekeeper entirely, since it'd be a Linux binary) — installs
+  fine, but crashes with `anon_mmap_fixed: Assertion failed` +
+  `qemu: uncaught target signal 6` on launch. This is a real,
+  documented incompatibility between Wine's low-level virtual-memory
+  management and QEMU's x86-on-ARM user-mode emulation — not a config
+  mistake, don't re-attempt this without a different emulation layer.
+
+The only reliable option is a real Windows VM — UTM (free) + a
+Windows-on-ARM image (Microsoft's Insider Preview VHDX, since their
+official free dev VMs are x64-only formats). The `.exe` is x86_64
+(mingw-w64 cross-compiled); Windows-on-ARM's built-in x64 emulation
+runs it fine.
+
 ## Known gaps (not yet solved)
 
 - **Not code-signed.** macOS shows a Gatekeeper "unidentified developer"
