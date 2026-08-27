@@ -58,6 +58,12 @@ locally before you tag anything).
    git push origin v0.x.y
    ```
 
+   Use the version that's actually in `Cargo.toml` — don't reuse or
+   guess a number. If a tag turns out wrong before its release
+   publishes, delete and recreate it; once a release has actually
+   published (has assets), ship a new version forward instead of
+   rewriting it.
+
    This is the point of no return for this version number — CI publishes
    a public GitHub Release from here. Double-check the tag matches
    `Cargo.toml`'s version before pushing it.
@@ -77,7 +83,8 @@ locally before you tag anything).
    ```
 
    All three should respond `302` (GitHub redirects release-asset
-   downloads to its CDN) rather than `404`.
+   downloads to its CDN) rather than `404`. For a full install-and-launch
+   check (not just that the file exists), see `INSTALL.md`.
 
 7. **Verify the downloads page** picks it up —
    `open-source.srotas.space/products/downloads` — the three buttons

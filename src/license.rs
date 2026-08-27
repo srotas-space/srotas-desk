@@ -11,7 +11,8 @@
 //! ```text
 //! version:     u8          (= 1)
 //! license_id:  [u8; 16]    (UUID bytes)
-//! device_id:   u8 len + UTF-8 bytes
+//! device_id:   u8 len + UTF-8 bytes (empty = matches any device — a
+//!              "universal" key, see verify_with_key)
 //! shop_name:   u16 len (big-endian) + UTF-8 bytes
 //! issued_at:   i64 (big-endian, unix seconds)
 //! expires_at:  i64 (big-endian, unix seconds; 0 = perpetual, no expiry)
@@ -121,7 +122,11 @@ fn verify_with_key(
     verifying_key.verify(payload_bytes, &signature).map_err(|_| LicenseError::BadSignature)?;
 
     let decoded = decode_payload(payload_bytes)?;
-    if decoded.device_id != expected_device_id {
+    // An empty device_id is a deliberate wildcard — a single publicly
+    // distributed key that activates on any machine, rather than the
+    // normal one-key-per-device model. Issued with device_id "" via the
+    // admin API (never by the per-device Buy License / Razorpay flow).
+    if !decoded.device_id.is_empty() && decoded.device_id != expected_device_id {
         return Err(LicenseError::DeviceMismatch);
     }
 
@@ -201,6 +206,15 @@ mod tests {
     }
 
     #[test]
+    fn a_key_with_empty_device_id_activates_on_any_device() {
+        let (signing_key, verifying_key) = test_keypair();
+        let key = sign_test_key(&signing_key, "", "Universal", Utc::now(), None);
+
+        assert!(verify_with_key(&key, "device-a", Utc::now(), &verifying_key).is_ok());
+        assert!(verify_with_key(&key, "some-other-completely-different-device", Utc::now(), &verifying_key).is_ok());
+    }
+
+    #[test]
     fn rejects_an_expired_key() {
         let (signing_key, verifying_key) = test_keypair();
         let issued_at = Utc::now() - Duration::days(400);
@@ -250,5 +264,18 @@ mod tests {
         let payload = verify(key, "11111111-2222-3333-4444-555555555555", Utc::now()).unwrap();
         assert_eq!(payload.shop_name, "Test Hardware Shop");
         assert!(payload.expires_at.is_some());
+    }
+
+    /// The actual universal (empty-device_id) key published on
+    /// open-source.srotas.space/products/desk/license — issued 2026-08-27
+    /// via `POST /admin/licenses` with `device_id: ""`. Confirms it
+    /// activates on an arbitrary device against the real embedded public
+    /// key, not just a throwaway test keypair.
+    #[test]
+    fn the_published_universal_key_activates_on_any_device() {
+        let key = "AR9XD6WnnkgUjtaPDg2Xy3QAAAtTcm90YXMgRGVzawAAAABqj8WdAAAAAAAAAABlosBH6RDtxjB1orI7noaUIoU2i3bnJFSvVdp7Bu7PglyFkOZXzbtpVNFhSSKlVTTfUgDqCmvwab/5FQ07dA4L";
+        let payload = verify(key, "any-random-device-id-whatsoever", Utc::now()).unwrap();
+        assert_eq!(payload.shop_name, "Srotas Desk");
+        assert!(payload.expires_at.is_none());
     }
 }

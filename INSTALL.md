@@ -9,6 +9,19 @@ None of these three builds are code-signed (see `DEPLOY.md`'s "Known
 gaps"), so each OS shows a first-run warning — that's expected, not a
 sign anything's wrong.
 
+## Activation
+
+First launch shows an "Activate Srotas Desk" screen with two fields —
+they are **not** the same thing:
+
+- **Device ID** (top, read-only): identifies this specific computer.
+  Nothing to do with this field except leave it alone, unless support
+  asks for it.
+- **License key** (bottom, where you paste something): get this from
+  `open-source.srotas.space/products/desk/license` — a single key
+  published there works on any machine, so just copy it in and click
+  **Activate**. It's not tied to your Device ID.
+
 ## macOS
 
 **Install:**
