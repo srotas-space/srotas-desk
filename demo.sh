@@ -23,6 +23,9 @@
 #
 set -euo pipefail
 
+# Copyright (c) 2026 Srotas — https://srotas.space
+# All rights reserved. See LICENSE.
+
 COUNT=100000
 DB=""
 MODE="" # fresh | append

@@ -423,3 +423,9 @@ x64 emulation.
 
 - **No auto-update.** Each version is a fresh manual download; the app
   never checks for or fetches updates.
+
+---
+
+© 2026 [Srotas](https://srotas.space). All rights reserved. This source is
+published, not open source — see [`LICENSE`](LICENSE) before
+redistributing anything built from it.

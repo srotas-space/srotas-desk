@@ -6,6 +6,8 @@ server or cloud involved.
 
 Runs on **Ubuntu/Linux, macOS and Windows**.
 
+© 2026 [Srotas](https://srotas.space). All rights reserved.
+
 ---
 
 ## Install it (for shopkeepers)
@@ -126,7 +128,7 @@ version is what tells a shopkeeper which build they're running.
 
 ```bash
 git add .
-git commit -m "Bump to 0.1.4"
+git commit -m "Copy rights and Bump to 0.1.5"
 git push origin main
 ```
 
@@ -140,8 +142,8 @@ cargo test
 ### 4. Tag and push
 
 ```bash
-git tag v0.1.4
-git push origin v0.1.4
+git tag v0.1.5
+git push origin v0.1.5
 ```
 
 **This is the point of no return for that version number.** CI publishes
@@ -207,6 +209,27 @@ app opens each day.
 
 There is no cloud copy and no account recovery. If that disk dies without
 a backup, the data is gone.
+
+---
+
+## Licence
+
+Copyright © 2026 **[Srotas](https://srotas.space)**. All rights reserved.
+
+This source is published so builds can be distributed and the code
+inspected — **not** as open source. No licence to copy, modify,
+redistribute or create derivative works is granted. See
+[`LICENSE`](LICENSE) for the full terms, and
+[srotas.space](https://srotas.space) for permissions and licensing
+enquiries.
+
+Using the app itself is covered by the licence key issued with it and the
+[Terms & Conditions](https://open-source.srotas.space/products/desk/tnc)
+accepted on activation.
+
+Third-party components keep their own licences — notably the bundled
+Inter typeface (SIL Open Font License 1.1) and the Rust crate
+dependencies. [`LICENSE`](LICENSE) lists them.
 
 ---
 

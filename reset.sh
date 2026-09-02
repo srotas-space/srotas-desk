@@ -18,6 +18,9 @@
 #
 set -euo pipefail
 
+# Copyright (c) 2026 Srotas — https://srotas.space
+# All rights reserved. See LICENSE.
+
 ASSUME_YES=0
 KEEP_LICENCE=0
 DATA_DIR=""

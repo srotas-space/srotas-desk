@@ -1,0 +1,45 @@
+Copyright © 2026 Srotas — https://srotas.space
+All rights reserved.
+
+This software and its source code are the proprietary and confidential
+property of Srotas. The source is published for transparency and to
+distribute builds; publication does not place it in the public domain and
+does not grant any licence to it.
+
+You may not copy, modify, merge, publish, distribute, sublicense, sell,
+reverse-engineer or create derivative works from this software, in whole
+or in part, without prior written permission from Srotas.
+
+Use of the compiled application is governed separately by the licence key
+issued with it and by the Terms & Conditions accepted on activation:
+https://open-source.srotas.space/products/desk/tnc
+
+For permissions, licensing enquiries or anything not covered above,
+contact us via https://srotas.space
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+--------------------------------------------------------------------------
+THIRD-PARTY COMPONENTS
+--------------------------------------------------------------------------
+
+The reservation of rights above covers Srotas' own work. This application
+also includes third-party components under their own licences, which are
+unaffected by it and remain in force:
+
+  Inter (assets/fonts/Inter-*.ttf)
+    Copyright © 2016 The Inter Project Authors
+    SIL Open Font License, Version 1.1
+    Full text: assets/fonts/Inter-LICENSE.txt
+
+  Rust crate dependencies
+    Each is licensed by its own authors, predominantly under MIT and/or
+    Apache-2.0. See Cargo.toml for the list; run `cargo license` or
+    `cargo about` for a full report.

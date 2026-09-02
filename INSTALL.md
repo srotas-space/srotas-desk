@@ -220,3 +220,10 @@ The app doesn't check for updates on its own, so check the downloads page
 now and then.
 
 Take a backup before upgrading anyway. It costs a moment.
+
+---
+
+© 2026 [Srotas](https://srotas.space). All rights reserved. Use of this
+app is governed by the licence key issued with it and the
+[Terms & Conditions](https://open-source.srotas.space/products/desk/tnc)
+accepted on activation.
