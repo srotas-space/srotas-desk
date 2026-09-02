@@ -1,5 +1,5 @@
-use chrono::{DateTime, NaiveDate, Utc};
-use iced::widget::{button, column, container, pick_list, row, scrollable, text};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use iced::widget::{button, column, container, grid, row, scrollable, text};
 use iced::{Element, Length, Task};
 use sqlx::SqlitePool;
 use std::path::PathBuf;
@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use super::{Message, Notice, State};
 use crate::money;
 use crate::repo::TransactionHistoryRow;
-use crate::ui::common::{item_options, ItemOption};
+use crate::ui::common::ItemOption;
 use crate::pdf;
 use crate::ui::{common, theme};
 
@@ -15,6 +15,77 @@ use crate::ui::{common, theme};
 pub enum Field {
     From,
     To,
+}
+
+impl Field {
+    fn label(self) -> &'static str {
+        match self {
+            Field::From => "From",
+            Field::To => "To",
+        }
+    }
+}
+
+/// How many transaction rows one page of the report shows. The report is
+/// a screen you scan, not a ledger you read end to end — and a shop with
+/// years of history has far more rows than are useful (or fast) to build
+/// widgets for at once.
+pub const PAGE_SIZE: i64 = 25;
+
+/// A ready-made date range, because "last month" is what a shopkeeper
+/// actually wants and typing two ISO dates to get it is a chore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preset {
+    Today,
+    Last7,
+    ThisMonth,
+    LastMonth,
+    ThisYear,
+    AllTime,
+}
+
+impl Preset {
+    pub const ALL: [Preset; 6] =
+        [Preset::Today, Preset::Last7, Preset::ThisMonth, Preset::LastMonth, Preset::ThisYear, Preset::AllTime];
+
+    fn label(self) -> &'static str {
+        match self {
+            Preset::Today => "Today",
+            Preset::Last7 => "Last 7 days",
+            Preset::ThisMonth => "This month",
+            Preset::LastMonth => "Last month",
+            Preset::ThisYear => "This year",
+            Preset::AllTime => "All time",
+        }
+    }
+
+    /// The range as (from, to), or `None` for either end meaning
+    /// "unbounded" — which is how All time clears both fields.
+    fn range(self, today: NaiveDate) -> (Option<NaiveDate>, Option<NaiveDate>) {
+        match self {
+            Preset::Today => (Some(today), Some(today)),
+            Preset::Last7 => (today.checked_sub_days(chrono::Days::new(6)), Some(today)),
+            Preset::ThisMonth => (today.with_day(1), Some(today)),
+            Preset::LastMonth => {
+                let first_this = today.with_day(1).unwrap_or(today);
+                let last_prev = first_this.pred_opt().unwrap_or(today);
+                (last_prev.with_day(1), Some(last_prev))
+            }
+            Preset::ThisYear => (NaiveDate::from_ymd_opt(today.year(), 1, 1), Some(today)),
+            Preset::AllTime => (None, None),
+        }
+    }
+}
+
+/// The calendar popup's state: which field it is picking for, and which
+/// month it is showing. `None` means no calendar is open.
+#[derive(Debug, Clone, Copy)]
+pub struct Calendar {
+    pub field: Field,
+    /// Always the first of the visible month — the grid is built by
+    /// walking forward from here, so keeping it normalised avoids
+    /// month-length edge cases every time it is read.
+    pub month: NaiveDate,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -25,6 +96,11 @@ pub struct ReportsState {
     pub stock_value_paise: i64,
     pub total_profit_paise: i64,
     pub rows: Vec<TransactionHistoryRow>,
+    /// Total matching transactions, for the pagination line. `rows` only
+    /// ever holds the current page.
+    pub total: i64,
+    pub page: i64,
+    pub calendar: Option<Calendar>,
 }
 
 impl ReportsState {
@@ -41,6 +117,43 @@ impl ReportsState {
             Field::To => self.to.clone(),
         }
     }
+
+    /// Opens the calendar on the month the field already names, so
+    /// re-opening a filled-in date lands where the shopkeeper left it
+    /// rather than on today.
+    pub fn open_calendar(&mut self, field: Field) {
+        let anchor = NaiveDate::parse_from_str(self.get_field(field).trim(), "%Y-%m-%d")
+            .unwrap_or_else(|_| Utc::now().date_naive());
+        let month = anchor.with_day(1).unwrap_or(anchor);
+        self.calendar = Some(Calendar { field, month });
+    }
+
+    pub fn apply_preset(&mut self, preset: Preset) {
+        let (from, to) = preset.range(Utc::now().date_naive());
+        self.from = from.map(|d| d.to_string()).unwrap_or_default();
+        self.to = to.map(|d| d.to_string()).unwrap_or_default();
+        self.calendar = None;
+    }
+
+    /// Steps the open calendar by whole months. Clamped to day 1, so
+    /// stepping from the 31st never skips a short month.
+    pub fn shift_month(&mut self, months: i32) {
+        let Some(cal) = &mut self.calendar else {
+            return;
+        };
+        let (mut y, mut m) = (cal.month.year(), cal.month.month() as i32 + months);
+        while m < 1 {
+            m += 12;
+            y -= 1;
+        }
+        while m > 12 {
+            m -= 12;
+            y += 1;
+        }
+        if let Some(d) = NaiveDate::from_ymd_opt(y, m as u32, 1) {
+            cal.month = d;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +161,7 @@ pub struct Loaded {
     pub stock_value_paise: i64,
     pub total_profit_paise: i64,
     pub rows: Vec<TransactionHistoryRow>,
+    pub total: i64,
 }
 
 fn parse_day_start(s: &str) -> Result<Option<DateTime<Utc>>, String> {
@@ -87,7 +201,14 @@ pub fn run(state: &mut State) -> Task<Message> {
     };
     let item_id = state.reports.item_filter.as_ref().map(|i| i.id);
 
-    load(pool, item_id, from, to)
+    load(pool, item_id, from, to, state.reports.page)
+}
+
+/// Re-runs the report on page 0 — what every filter change wants, since
+/// page 4 of the old result set means nothing against a new filter.
+pub fn run_from_start(state: &mut State) -> Task<Message> {
+    state.reports.page = 0;
+    run(state)
 }
 
 fn load(
@@ -95,13 +216,27 @@ fn load(
     item_id: Option<i64>,
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
+    page: i64,
 ) -> Task<Message> {
     Task::perform(
         async move {
+            // Every figure here is aggregated in SQL and only one page of
+            // rows comes back, so the work is the same whether the shop
+            // has fifty transactions or half a million.
             let stock_value_paise = crate::repo::current_stock_value_paise(&pool).await?;
             let total_profit_paise = crate::repo::total_profit_paise(&pool, item_id, from, to).await?;
-            let rows = crate::repo::transaction_history(&pool, None, item_id, from, to, Some(200)).await?;
-            Ok::<_, crate::repo::RepoError>(Loaded { stock_value_paise, total_profit_paise, rows })
+            let total = crate::repo::transaction_count(&pool, item_id, from, to).await?;
+            let rows = crate::repo::transaction_history(
+                &pool,
+                None,
+                item_id,
+                from,
+                to,
+                Some(PAGE_SIZE),
+                page * PAGE_SIZE,
+            )
+            .await?;
+            Ok::<_, crate::repo::RepoError>(Loaded { stock_value_paise, total_profit_paise, rows, total })
         },
         |result| Message::ReportsLoaded(result.map_err(|e| e.to_string())),
     )
@@ -109,53 +244,257 @@ fn load(
 
 pub fn view(state: &State) -> Element<'_, Message> {
     let reports = &state.reports;
-    let options = item_options(&state.items);
 
-    let filters = column![
-        text("Filters").size(14).color(theme::MUTED_TEXT),
-        row![
-            labeled(
-                "Item (blank = all)",
-                pick_list(options, reports.item_filter.clone(), |v| Message::ReportsItemFilterSelected(Some(v)))
-                    .padding(10)
-                    .width(Length::Fixed(220.0)),
-            ),
-            labeled("From (YYYY-MM-DD)", common::field("2026-08-01", &reports.from).on_input(|v| Message::ReportsFieldChanged(Field::From, v)).width(Length::Fixed(160.0))),
-            labeled("To (YYYY-MM-DD)", common::field("2026-08-31", &reports.to).on_input(|v| Message::ReportsFieldChanged(Field::To, v)).width(Length::Fixed(160.0))),
-            button(text("Clear item").size(13)).style(theme::secondary_button).padding([10, 16]).on_press(Message::ReportsItemFilterSelected(None)),
-            button(text("Run Report").size(15)).style(theme::primary_button).padding([10, 20]).on_press(Message::RunReports),
-            button(text("Download").size(15)).style(theme::success_button).padding([10, 20]).on_press(Message::DownloadReportPressed),
-        ]
-        .spacing(theme::SPACE_MD)
-        .align_y(iced::Alignment::End),
+    // The picker holds at most `PICKER_LIMIT` candidates, requeried from
+    // the database on every keystroke. It is never built from a catalogue
+    // in memory — doing that in `view` cloned every item name on every
+    // redraw, which is what used to hang this screen.
+    let item_picker = common::item_picker(
+        &state.picker,
+        common::PickerTarget::Report,
+        "All items",
+        |v| Message::ReportsItemFilterSelected(Some(v)),
+        Length::Fixed(240.0),
+    );
+
+    let presets = row(Preset::ALL.iter().map(|p| {
+        button(text(p.label()).size(theme::TEXT_SMALL))
+            .style(theme::secondary_button)
+            .padding([7, 13])
+            .on_press(Message::ReportsPresetSelected(*p))
+            .into()
+    }))
+    .spacing(theme::SPACE_XS);
+
+    let filter_row = row![
+        labeled("Item", item_picker),
+        labeled("From", date_field(reports, Field::From)),
+        labeled("To", date_field(reports, Field::To)),
+        button(text("Clear").size(theme::TEXT_SMALL))
+            .style(theme::secondary_button)
+            .padding(theme::CONTROL_PADDING)
+            .on_press(Message::ReportsFiltersCleared),
+        button(text("Run Report").size(theme::TEXT_BODY).font(theme::SEMIBOLD))
+            .style(theme::primary_button)
+            .padding(theme::CONTROL_PADDING)
+            .on_press(Message::RunReports),
+        button(text("Download").size(theme::TEXT_BODY))
+            .style(theme::success_button)
+            .padding(theme::CONTROL_PADDING)
+            .on_press(Message::DownloadReportPressed),
+    ]
+    .spacing(theme::SPACE_MD)
+    .align_y(iced::Alignment::End);
+
+    let mut filters = column![
+        text("Filters").size(theme::TEXT_SMALL).color(theme::MUTED_TEXT),
+        presets,
+        filter_row,
     ]
     .spacing(theme::SPACE_SM);
 
+    // The calendar sits inline under the filters rather than floating over
+    // them: it only ever appears in one place, and an inline panel can't
+    // end up clipped or mispositioned the way an overlay can.
+    if let Some(cal) = &reports.calendar {
+        filters = filters.push(calendar_panel(cal));
+    }
+
     let summary = row![
         stat_card("Current Stock Value", money::format_paise(reports.stock_value_paise)),
-        stat_card("Total Profit (filtered)", money::format_paise(reports.total_profit_paise)),
+        stat_card("Profit (filtered)", money::format_paise(reports.total_profit_paise)),
+        stat_card("Transactions", reports.total.to_string()),
     ]
     .spacing(theme::SPACE_MD);
 
-    let mut history = column![text("Transaction History").size(16)].spacing(6);
+    let mut history = column![].spacing(theme::SPACE_XS);
     if reports.rows.is_empty() {
-        history = history.push(text("No transactions match this filter.").size(13));
+        history = history.push(
+            text("No transactions match this filter.").size(theme::TEXT_SMALL).color(theme::MUTED_TEXT),
+        );
     }
     for row in &reports.rows {
         history = history.push(history_row(row));
     }
 
-    container(
+    let page_count = ((reports.total as f64) / PAGE_SIZE as f64).ceil().max(1.0) as i64;
+    let start = reports.page * PAGE_SIZE;
+    let range = if reports.total == 0 {
+        "0 of 0".to_string()
+    } else {
+        format!("{}-{} of {}", start + 1, (start + PAGE_SIZE).min(reports.total), reports.total)
+    };
+
+    let pagination = row![
+        text(range).size(theme::TEXT_SMALL).color(theme::MUTED_TEXT),
+        iced::widget::space::horizontal(),
+        button(text("Prev").size(theme::TEXT_SMALL))
+            .style(theme::secondary_button)
+            .padding([8, 16])
+            .on_press_maybe((reports.page > 0).then_some(Message::ReportsPagePrev)),
+        text(format!("Page {} of {}", reports.page + 1, page_count))
+            .size(theme::TEXT_SMALL)
+            .color(theme::MUTED_TEXT),
+        button(text("Next").size(theme::TEXT_SMALL))
+            .style(theme::secondary_button)
+            .padding([8, 16])
+            .on_press_maybe((reports.page + 1 < page_count).then_some(Message::ReportsPageNext)),
+    ]
+    .spacing(theme::SPACE_SM)
+    .align_y(iced::Alignment::Center);
+
+    let table = container(
         column![
-            container(filters).style(theme::card).padding(theme::SPACE_MD),
-            summary,
-            scrollable(container(history).style(theme::card).padding(theme::SPACE_MD)).height(Length::Fill),
+            row![
+                text("Transaction History").size(theme::TEXT_HEADING).font(theme::SEMIBOLD),
+                iced::widget::space::horizontal(),
+            ],
+            scrollable(history).height(Length::Fill),
+            pagination,
         ]
-        .spacing(theme::SPACE_MD)
-        .padding(theme::SPACE_MD),
+        .spacing(theme::SPACE_MD),
+    )
+    .style(theme::card)
+    .padding(theme::SPACE_MD)
+    .height(Length::Fill);
+
+    container(
+        column![container(filters).style(theme::card).padding(theme::SPACE_MD), summary, table]
+            .spacing(theme::SPACE_MD)
+            .padding([0, theme::SPACE_MD as u16]),
     )
     .width(Length::Fill)
     .height(Length::Fill)
+    .into()
+}
+
+/// A date field: the typed value, plus a button that opens the calendar.
+/// Typing still works — the calendar is a convenience, not a replacement,
+/// because a shopkeeper who knows the date they want shouldn't have to
+/// click through months to reach it.
+fn date_field(reports: &ReportsState, field: Field) -> Element<'_, Message> {
+    let open = reports.calendar.map(|c| c.field) == Some(field);
+
+    row![
+        common::field("YYYY-MM-DD", reports_value(reports, field))
+            .on_input(move |v| Message::ReportsFieldChanged(field, v))
+            .width(Length::Fixed(130.0)),
+        button(text(if open { "×" } else { "📅" }).size(theme::TEXT_BODY))
+            .style(if open { theme::primary_button } else { theme::secondary_button })
+            .padding([theme::FIELD_PADDING, 12])
+            .on_press(if open { Message::ReportsCalendarClosed } else { Message::ReportsCalendarOpened(field) }),
+    ]
+    .spacing(theme::SPACE_XS)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+fn reports_value(reports: &ReportsState, field: Field) -> &str {
+    match field {
+        Field::From => &reports.from,
+        Field::To => &reports.to,
+    }
+}
+
+/// A month grid. Seven columns, Monday first, with the days of the
+/// previous/next month left blank rather than filled in — a blank cell
+/// reads unambiguously as "not this month", where a greyed-out 29 does
+/// not.
+fn calendar_panel(cal: &Calendar) -> Element<'static, Message> {
+    let today = Utc::now().date_naive();
+    let selected = None::<NaiveDate>;
+
+    let header = row![
+        button(text("‹").size(theme::TEXT_HEADING))
+            .style(theme::secondary_button)
+            .padding([4, 12])
+            .on_press(Message::ReportsCalendarShifted(-1)),
+        iced::widget::space::horizontal(),
+        column![
+            text(format!("Pick “{}” date", cal.field.label())).size(theme::TEXT_CAPTION).color(theme::MUTED_TEXT),
+            text(cal.month.format("%B %Y").to_string()).size(theme::TEXT_BODY).font(theme::SEMIBOLD),
+        ]
+        .spacing(1)
+        .align_x(iced::Alignment::Center),
+        iced::widget::space::horizontal(),
+        button(text("›").size(theme::TEXT_HEADING))
+            .style(theme::secondary_button)
+            .padding([4, 12])
+            .on_press(Message::ReportsCalendarShifted(1)),
+    ]
+    .align_y(iced::Alignment::Center);
+
+    let mut cells: Vec<Element<'static, Message>> = Vec::with_capacity(49);
+    for name in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"] {
+        cells.push(
+            container(text(name).size(theme::TEXT_CAPTION).color(theme::MUTED_TEXT))
+                .width(Length::Fixed(38.0))
+                .align_x(iced::Alignment::Center)
+                .into(),
+        );
+    }
+
+    // Blank cells to push the 1st under its weekday column.
+    for _ in 0..cal.month.weekday().num_days_from_monday() {
+        cells.push(iced::widget::space::horizontal().width(Length::Fixed(38.0)).into());
+    }
+
+    let mut day = cal.month;
+    while day.month() == cal.month.month() {
+        let is_today = day == today;
+        let is_selected = selected == Some(day);
+        let label = text(day.day().to_string()).size(theme::TEXT_SMALL);
+
+        let style = if is_selected {
+            theme::primary_button
+        } else if is_today {
+            theme::tab_selected
+        } else {
+            theme::tab_idle
+        };
+
+        cells.push(
+            button(container(label).width(Length::Fill).align_x(iced::Alignment::Center))
+                .style(style)
+                .padding([6, 0])
+                .width(Length::Fixed(38.0))
+                .on_press(Message::ReportsDatePicked(day))
+                .into(),
+        );
+
+        match day.succ_opt() {
+            Some(next) => day = next,
+            None => break,
+        }
+    }
+
+    container(
+        column![
+            header,
+            grid(cells).columns(7).spacing(theme::SPACE_XS),
+            row![
+                button(text("Clear this date").size(theme::TEXT_SMALL))
+                    .style(theme::secondary_button)
+                    .padding([7, 13])
+                    .on_press(Message::ReportsDateCleared),
+                button(text("Today").size(theme::TEXT_SMALL))
+                    .style(theme::secondary_button)
+                    .padding([7, 13])
+                    .on_press(Message::ReportsDatePicked(today)),
+                iced::widget::space::horizontal(),
+                button(text("Done").size(theme::TEXT_SMALL).font(theme::SEMIBOLD))
+                    .style(theme::primary_button)
+                    .padding([7, 16])
+                    .on_press(Message::ReportsCalendarClosed),
+            ]
+            .spacing(theme::SPACE_XS)
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(theme::SPACE_SM),
+    )
+    .style(theme::panel)
+    .padding(theme::SPACE_MD)
+    .width(Length::Fixed(320.0))
     .into()
 }
 
@@ -199,6 +538,12 @@ fn labeled<'a>(label: &'a str, widget: impl Into<Element<'a, Message>>) -> Eleme
 /// cached numbers, which can be stale or still at their zero/default if
 /// "Run Report" was never pressed (or hasn't finished yet) before the
 /// shopkeeper hits "Download".
+/// How many transaction rows a downloaded PDF carries. Bounded so a shop
+/// with years of history gets a report it can actually open, rather than
+/// a thousand-page file — the summary figures above the table are
+/// computed over the *whole* filter regardless.
+const PDF_ROW_LIMIT: i64 = 1000;
+
 struct Export {
     item_label: String,
     from_label: String,
@@ -206,6 +551,9 @@ struct Export {
     stock_value_paise: i64,
     total_profit_paise: i64,
     rows: Vec<TransactionHistoryRow>,
+    /// Every matching transaction, not just the rows carried above — so
+    /// the PDF can say when it is showing a truncated view.
+    total: i64,
 }
 
 /// Re-fetches the report with the currently-set filters, builds the PDF
@@ -238,14 +586,25 @@ pub fn download(state: &State) -> Task<Message> {
         async move {
             let stock_value_paise = crate::repo::current_stock_value_paise(&pool).await.map_err(|e| e.to_string())?;
             let total_profit_paise = crate::repo::total_profit_paise(&pool, item_id, from, to).await.map_err(|e| e.to_string())?;
-            let rows = crate::repo::transaction_history(&pool, None, item_id, from, to, Some(200)).await.map_err(|e| e.to_string())?;
+            let total = crate::repo::transaction_count(&pool, item_id, from, to).await.map_err(|e| e.to_string())?;
+            // A printed report is a document rather than a screen, so it
+            // carries more than one page — but still a bounded number.
+            // `PDF_ROW_LIMIT` rows is already ~40 pages of A4.
+            let rows = crate::repo::transaction_history(&pool, None, item_id, from, to, Some(PDF_ROW_LIMIT), 0)
+                .await
+                .map_err(|e| e.to_string())?;
 
-            let export = Export { item_label, from_label, to_label, stock_value_paise, total_profit_paise, rows };
+            let export = Export { item_label, from_label, to_label, stock_value_paise, total_profit_paise, rows, total };
             let bytes = build_pdf_bytes(&shop, &export)?;
             let path = save_and_open(bytes).await?;
 
             Ok((
-                Loaded { stock_value_paise: export.stock_value_paise, total_profit_paise: export.total_profit_paise, rows: export.rows },
+                Loaded {
+                    stock_value_paise: export.stock_value_paise,
+                    total_profit_paise: export.total_profit_paise,
+                    rows: Vec::new(), // the screen keeps its own page; see ReportPdfReady
+                    total: export.total,
+                },
                 path,
             ))
         },
@@ -334,6 +693,7 @@ mod tests {
             stock_value_paise: 0,
             total_profit_paise: 0,
             rows: Vec::new(),
+            total: 0,
         }
     }
 

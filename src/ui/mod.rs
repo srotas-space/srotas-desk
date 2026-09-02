@@ -1,6 +1,7 @@
 mod activation;
 mod backup;
 mod bills;
+mod catalogue;
 mod common;
 mod home;
 mod items;
@@ -100,7 +101,32 @@ pub struct State {
     shop: Option<ShopProfile>,
     settings: crate::settings::Settings,
 
+    /// The whole catalogue, held only when Settings → Performance has
+    /// "keep the catalogue in memory" switched on. Empty in the default
+    /// mode, where every screen queries for the rows it draws instead.
+    /// See `ui::catalogue` for the in-memory half.
+    resident: Vec<Item>,
+    /// The current page of the Inventory list — never the whole
+    /// catalogue. Every screen that shows items now asks the database for
+    /// exactly the rows it is about to draw, so a shop with a hundred
+    /// thousand SKUs costs the same as one with fifty.
     items: Vec<Item>,
+    /// How many items match the Inventory list's current search/filters,
+    /// for its page indicator.
+    items_total: i64,
+    /// The item behind `viewing_item_id`, fetched on demand — the list
+    /// page it was opened from may not even be loaded any more.
+    viewing_item: Option<Item>,
+    /// Whichever item the Sales form has selected, fetched when it is
+    /// picked so the Details panel has its stock and prices.
+    sale_item: Option<Item>,
+    /// What the item pickers have been typed into, and the candidates
+    /// that came back. Shared by Sales, Billings and Reports — one query,
+    /// one result set, whichever screen asked.
+    picker: common::PickerState,
+    /// The low-stock page shown on Shop → Details, and its total.
+    low_stock: Vec<Item>,
+    low_stock_total: i64,
     /// Set when an action finishes — well or badly — so the shopkeeper sees
     /// *something* rather than a silently-failed (or silently-succeeded)
     /// action.
@@ -137,19 +163,14 @@ pub struct State {
 
     shop_tab: ShopTab,
     sale_form: sale::SaleForm,
-    /// Backing state for the searchable item picker on the billing screen.
-    /// Rebuilt from `items` whenever that reloads — see `ItemsLoaded`.
-    sale_item_combo: iced::widget::combo_box::State<ItemOption>,
     /// Page index of the low-stock list on Shop → Details. Derived from
     /// `items`, so it needs no loading of its own — only clamping, which
     /// `sale::low_stock_page` does on read.
     low_stock_page: usize,
     reports: reports::ReportsState,
 
+
     bills: bills::BillsState,
-    /// Backing state for the searchable item picker on the Billings "add
-    /// line" form. Rebuilt from `items` whenever that reloads.
-    bill_item_combo: iced::widget::combo_box::State<ItemOption>,
 
     settings_tab: settings::SettingsTab,
     profile_form: settings::ProfileForm,
@@ -177,7 +198,14 @@ impl Default for State {
             stage: Stage::Loading,
             shop: None,
             settings: crate::settings::Settings::default(),
+            resident: Vec::new(),
             items: Vec::new(),
+            items_total: 0,
+            viewing_item: None,
+            sale_item: None,
+            picker: common::PickerState::default(),
+            low_stock: Vec::new(),
+            low_stock_total: 0,
             notice: None,
             search_query: String::new(),
             item_form: None,
@@ -196,11 +224,9 @@ impl Default for State {
             device_id: String::new(),
             shop_tab: ShopTab::Details,
             sale_form: sale::SaleForm::default(),
-            sale_item_combo: iced::widget::combo_box::State::new(Vec::new()),
             low_stock_page: 0,
             reports: reports::ReportsState::default(),
             bills: bills::BillsState::default(),
-            bill_item_combo: iced::widget::combo_box::State::new(Vec::new()),
             settings_tab: settings::SettingsTab::Profile,
             profile_form: settings::ProfileForm::default(),
             security_form: settings::SecurityForm::default(),
@@ -328,7 +354,21 @@ pub enum Message {
     SubmitActivation,
     ActivationCompleted(Result<(), String>),
     ShopProfileLoaded(Result<Option<ShopProfile>, String>),
-    ItemsLoaded(Result<Vec<Item>, String>),
+    ItemsLoaded(Result<(Vec<Item>, i64, i64), String>),
+    LowStockLoaded(Result<(Vec<Item>, i64, i64), String>),
+    PickerOptionsLoaded(Result<Vec<Item>, String>),
+    /// The whole catalogue, for the in-memory mode. Only ever sent when
+    /// that mode is on — see `load_resident`.
+    CatalogueLoaded(Result<Vec<Item>, String>),
+    /// Settings → Performance: switch between holding the catalogue in
+    /// memory and querying for it on demand.
+    PreloadToggled(bool),
+    /// A keystroke in one of the item pickers — re-queries rather than
+    /// filtering a list held in memory.
+    PickerInputChanged(common::PickerTarget, String),
+    ViewItemLoaded(Result<Option<Item>, String>),
+    SaleItemLoaded(Result<Option<Item>, String>),
+    BillItemLoaded(Result<Option<Item>, String>),
     ThumbnailLoaded(i64, Option<Vec<u8>>),
 
     GoToShop,
@@ -414,6 +454,15 @@ pub enum Message {
 
     ReportsItemFilterSelected(Option<ItemOption>),
     ReportsFieldChanged(reports::Field, String),
+    ReportsFiltersCleared,
+    ReportsPresetSelected(reports::Preset),
+    ReportsCalendarOpened(reports::Field),
+    ReportsCalendarClosed,
+    ReportsCalendarShifted(i32),
+    ReportsDatePicked(chrono::NaiveDate),
+    ReportsDateCleared,
+    ReportsPageNext,
+    ReportsPagePrev,
     RunReports,
     ReportsLoaded(Result<reports::Loaded, String>),
     DownloadReportPressed,
@@ -557,8 +606,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             let Some(pool) = state.pool.clone() else {
                 return Task::none();
             };
-            let for_items = pool.clone();
-            Task::batch([load_items(for_items), load_shop_profile(pool)])
+            Task::batch([load_shop_profile(pool), load_picker(state, String::new()), load_resident(state)])
         }
         Message::LicenseChecked(Ok(activation::Outcome::NeedsActivation { device_id, message })) => {
             state.device_id = device_id.clone();
@@ -593,8 +641,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             let Some(pool) = state.pool.clone() else {
                 return Task::none();
             };
-            let for_items = pool.clone();
-            Task::batch([load_items(for_items), load_shop_profile(pool)])
+            Task::batch([load_shop_profile(pool), load_picker(state, String::new()), load_resident(state)])
         }
         Message::ActivationCompleted(Err(e)) => {
             state.activation.error = Some(e);
@@ -616,15 +663,110 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             state.notice = Some(Notice::error(format!("could not load shop profile: {e}")));
             Task::none()
         }
-        Message::ItemsLoaded(Ok(items)) => {
-            let options = crate::ui::common::item_options(&items);
-            state.sale_item_combo = iced::widget::combo_box::State::new(options.clone());
-            state.bill_item_combo = iced::widget::combo_box::State::new(options);
+        Message::ItemsLoaded(Ok((items, total, page))) => {
             state.items = items;
+            state.items_total = total;
+            state.items_page = page as usize;
             refresh_item_thumbnails(state)
         }
         Message::ItemsLoaded(Err(e)) => {
             state.notice = Some(Notice::error(format!("could not load items: {e}")));
+            Task::none()
+        }
+        Message::LowStockLoaded(Ok((items, total, page))) => {
+            state.low_stock = items;
+            state.low_stock_total = total;
+            state.low_stock_page = page as usize;
+            Task::none()
+        }
+        Message::LowStockLoaded(Err(e)) => {
+            state.notice = Some(Notice::error(format!("could not load low stock: {e}")));
+            Task::none()
+        }
+        Message::PickerOptionsLoaded(Ok(items)) => {
+            // All three pickers share one set of candidates: they are the
+            // same question ("which item?") asked from three screens, and
+            // keeping one list means one query per keystroke rather than
+            // three.
+            state.picker.options = crate::ui::common::item_options(&items);
+            Task::none()
+        }
+        Message::CatalogueLoaded(Ok(items)) => {
+            state.resident = items;
+            // The list, low-stock panel and pickers all read from the
+            // resident copy in this mode, so they are refreshed now that
+            // it exists rather than left showing a stale page.
+            Task::batch([load_items(state), load_low_stock(state), load_picker(state, String::new())])
+        }
+        Message::CatalogueLoaded(Err(e)) => {
+            // Falling back rather than failing: an unusable screen is a
+            // worse outcome than quietly using the cheaper mode.
+            state.settings.preload_catalogue = false;
+            let _ = crate::settings::save(&state.settings);
+            state.notice = Some(Notice::warning(format!(
+                "Could not hold the catalogue in memory ({e}) — switched back to loading items as needed."
+            )));
+            Task::batch([load_items(state), load_low_stock(state), load_picker(state, String::new())])
+        }
+        Message::PreloadToggled(on) => {
+            state.settings.preload_catalogue = on;
+            let _ = crate::settings::save(&state.settings);
+
+            if on {
+                state.notice = Some(Notice::success("Catalogue will be kept in memory."));
+                load_resident(state)
+            } else {
+                // Drop the resident copy immediately — the whole point of
+                // switching off is to stop paying for it — then reload the
+                // visible screens from the database.
+                state.resident = Vec::new();
+                state.resident.shrink_to_fit();
+                state.notice = Some(Notice::success("Items will be loaded as needed."));
+                Task::batch([load_items(state), load_low_stock(state), load_picker(state, String::new())])
+            }
+        }
+        Message::PickerOptionsLoaded(Err(e)) => {
+            state.notice = Some(Notice::error(format!("could not search items: {e}")));
+            Task::none()
+        }
+        Message::PickerInputChanged(target, query) => {
+            state.picker.typed(target, query.clone());
+            load_picker(state, query)
+        }
+        Message::ViewItemLoaded(Ok(item)) => {
+            state.viewing_item = item;
+            Task::none()
+        }
+        Message::ViewItemLoaded(Err(e)) => {
+            state.notice = Some(Notice::error(e));
+            Task::none()
+        }
+        Message::SaleItemLoaded(Ok(item)) => {
+            // Pre-fill the price from the item the shopkeeper just picked,
+            // unless they have already typed one over it.
+            if let Some(item) = &item {
+                if state.sale_form.price.trim().is_empty() {
+                    state.sale_form.price = money::paise_to_input(item.sell_price_paise);
+                }
+            }
+            state.sale_item = item;
+            Task::none()
+        }
+        Message::SaleItemLoaded(Err(e)) => {
+            state.notice = Some(Notice::error(e));
+            Task::none()
+        }
+        Message::BillItemLoaded(Ok(item)) => {
+            if let Some(item) = &item {
+                if state.bills.price_input.trim().is_empty() {
+                    state.bills.price_input = money::paise_to_input(item.sell_price_paise);
+                }
+                state.bills.item_gst_rate_bp = item.gst_rate_bp;
+            }
+            Task::none()
+        }
+        Message::BillItemLoaded(Err(e)) => {
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
         Message::ThumbnailLoaded(id, Some(bytes)) => {
@@ -639,7 +781,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::GoToInventory => {
             state.stage = Stage::Inventory;
-            Task::none()
+            load_items(state)
         }
         Message::GoHome => {
             state.stage = Stage::Home;
@@ -661,11 +803,17 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::InventoryTabSelected(tab) => {
             state.inventory_tab = tab;
-            Task::none()
+            match tab {
+                InventoryTab::Items => load_items(state),
+                InventoryTab::Backup => Task::none(),
+            }
         }
         Message::SearchChanged(query) => {
+            // Re-queries the database on every keystroke rather than
+            // filtering a catalogue held in memory. `push_edit` resets the
+            // page to 0 — see `apply_edit`.
             push_edit(state, EditableField::Search, query);
-            refresh_item_thumbnails(state)
+            load_items(state)
         }
 
         Message::OpenAddItemForm => {
@@ -674,7 +822,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::OpenEditItemForm(id) => {
-            let Some(item) = state.items.iter().find(|i| i.id == id) else {
+            let Some(item) = on_screen_item(state, id) else {
                 return Task::none();
             };
             state.item_form = Some(ItemForm::from_item(item));
@@ -773,32 +921,43 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::UnitFilterSelected(filter) => {
             state.unit_filter = filter;
             state.items_page = 0;
-            refresh_item_thumbnails(state)
+            load_items(state)
         }
         Message::LowStockOnlyToggled(enabled) => {
             state.low_stock_only = enabled;
             state.items_page = 0;
-            refresh_item_thumbnails(state)
+            load_items(state)
         }
         Message::ItemsPageNext => {
             state.items_page += 1;
-            refresh_item_thumbnails(state)
+            load_items(state)
         }
         Message::ItemsPagePrev => {
             state.items_page = state.items_page.saturating_sub(1);
-            refresh_item_thumbnails(state)
+            load_items(state)
         }
         Message::OpenViewItem(id) => {
+            state.viewing_item = None;
             state.viewing_item_id = Some(id);
             state.view_image = None;
             state.item_form = None;
             let Some(pool) = state.pool.clone() else {
                 return Task::none();
             };
-            Task::perform(
-                async move { crate::repo::get_item_image(&pool, id).await.unwrap_or(None) },
-                move |image| Message::ViewImageLoaded(id, image),
-            )
+            let pool2 = pool.clone();
+            // Fetch the row as well as the photo: the list page it was
+            // opened from is only ever a page, and may not hold this item
+            // by the time the detail screen draws.
+            Task::batch([
+                Task::perform(
+                    async move { crate::repo::get_item_image(&pool2, id).await.unwrap_or(None) },
+                    move |image| Message::ViewImageLoaded(id, image),
+                ),
+                Task::perform(
+                    async move { crate::repo::get_item(&pool, id).await.map_err(|e| e.to_string()) },
+                    Message::ViewItemLoaded,
+                ),
+            ])
         }
         Message::ViewImageLoaded(id, image) => {
             if state.viewing_item_id == Some(id) {
@@ -813,7 +972,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
 
         Message::OpenPurchaseForm(id) => {
-            if let Some(item) = state.items.iter().find(|i| i.id == id) {
+            if let Some(item) = on_screen_item(state, id) {
                 state.purchase_form = Some(items::PurchaseForm {
                     item_id: item.id,
                     item_name: item.name.clone(),
@@ -900,8 +1059,8 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Tick => Task::none(),
 
         Message::SaleItemSelected(option) => {
-            sale::select_item(state, option);
-            Task::none()
+            state.picker.chose(option.name.clone());
+            sale::select_item(state, option)
         }
         Message::SaleFieldChanged(field, value) => {
             push_edit(state, EditableField::Sale(field), value);
@@ -919,16 +1078,16 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::LowStockPageNext => {
             state.low_stock_page += 1;
-            Task::none()
+            load_low_stock(state)
         }
         Message::LowStockPagePrev => {
             state.low_stock_page = state.low_stock_page.saturating_sub(1);
-            Task::none()
+            load_low_stock(state)
         }
 
         Message::BillItemSelected(option) => {
-            bills::select_item(state, option);
-            Task::none()
+            state.picker.chose(option.name.clone());
+            bills::select_item(state, option)
         }
         Message::BillQtyChanged(value) => {
             push_edit(state, EditableField::BillQty, value);
@@ -961,7 +1120,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             let Some(pool) = state.pool.clone() else {
                 return Task::none();
             };
-            Task::batch([load_items(pool.clone()), bills::load_history(pool, state.bills.page)])
+            Task::batch([reload_items(state), bills::load_history(pool, state.bills.page)])
         }
         Message::BillSaved(Err(e)) => {
             state.notice = Some(Notice::error(e));
@@ -1071,18 +1230,73 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
 
         Message::ReportsItemFilterSelected(option) => {
+            match &option {
+                Some(o) => state.picker.chose(o.name.clone()),
+                None => state.picker.clear(),
+            }
             state.reports.item_filter = option;
-            reports::run(state)
+            reports::run_from_start(state)
         }
         Message::ReportsFieldChanged(field, value) => {
             push_edit(state, EditableField::Reports(field), value);
             Task::none()
         }
-        Message::RunReports => reports::run(state),
+        Message::ReportsFiltersCleared => {
+            state.picker.clear();
+            state.reports.item_filter = None;
+            state.reports.from.clear();
+            state.reports.to.clear();
+            state.reports.calendar = None;
+            reports::run_from_start(state)
+        }
+        Message::ReportsPresetSelected(preset) => {
+            state.reports.apply_preset(preset);
+            reports::run_from_start(state)
+        }
+        Message::ReportsCalendarOpened(field) => {
+            state.reports.open_calendar(field);
+            Task::none()
+        }
+        Message::ReportsCalendarClosed => {
+            state.reports.calendar = None;
+            Task::none()
+        }
+        Message::ReportsCalendarShifted(months) => {
+            state.reports.shift_month(months);
+            Task::none()
+        }
+        Message::ReportsDatePicked(date) => {
+            // Picking a date runs the report straight away — the whole
+            // point of the calendar is not having to press Run as well.
+            let Some(cal) = state.reports.calendar else {
+                return Task::none();
+            };
+            state.reports.set_field(cal.field, date.to_string());
+            state.reports.calendar = None;
+            reports::run_from_start(state)
+        }
+        Message::ReportsDateCleared => {
+            let Some(cal) = state.reports.calendar else {
+                return Task::none();
+            };
+            state.reports.set_field(cal.field, String::new());
+            state.reports.calendar = None;
+            reports::run_from_start(state)
+        }
+        Message::ReportsPageNext => {
+            state.reports.page += 1;
+            reports::run(state)
+        }
+        Message::ReportsPagePrev => {
+            state.reports.page = state.reports.page.saturating_sub(1);
+            reports::run(state)
+        }
+        Message::RunReports => reports::run_from_start(state),
         Message::ReportsLoaded(Ok(loaded)) => {
             state.reports.stock_value_paise = loaded.stock_value_paise;
             state.reports.total_profit_paise = loaded.total_profit_paise;
             state.reports.rows = loaded.rows;
+            state.reports.total = loaded.total;
             Task::none()
         }
         Message::ReportsLoaded(Err(e)) => {
@@ -1206,16 +1420,124 @@ fn enter_shop_tab(state: &mut State, tab: ShopTab) -> Task<Message> {
     match tab {
         // Details shows low stock, which is derived from `items` — so it
         // needs those fresh rather than a list of its own.
-        ShopTab::Details => load_items(pool),
+        // Details shows low stock and an item picker — both of which ask
+        // the database for just what they draw.
+        ShopTab::Details => Task::batch([load_low_stock(state), load_picker(state, String::new())]),
         ShopTab::Billings => bills::load_history(pool, state.bills.page),
         ShopTab::Reports => reports::run(state),
     }
 }
 
-fn load_items(pool: SqlitePool) -> Task<Message> {
+/// How many candidates an item picker offers at once. Twenty is more than
+/// fits on screen, so the shopkeeper types to narrow rather than scrolls
+/// to find — and the picker never holds more than a screenful whatever
+/// the catalogue's size.
+pub const PICKER_LIMIT: i64 = 20;
+
+/// Loads the Inventory list's current page and its total. Called after
+/// anything that changes what should be on it — a search keystroke, a
+/// filter, a page step, or an edit.
+fn load_items(state: &State) -> Task<Message> {
+    let query = state.search_query.trim().to_string();
+    let unit = state.unit_filter.as_unit();
+    let low_only = state.low_stock_only;
+    let page = state.items_page as i64;
+
+    // The two modes differ here and nowhere else. Whichever runs, it
+    // produces the same `(rows, total, page)` — so every screen below
+    // reads the same fields and needs no idea which mode is on.
+    if state.settings.preload_catalogue {
+        let (rows, total, page) =
+            catalogue::page(&state.resident, &query, unit, low_only, items::PAGE_SIZE, page.max(0) as usize);
+        return Task::done(Message::ItemsLoaded(Ok((rows, total, page as i64))));
+    }
+
+    let Some(pool) = state.pool.clone() else {
+        return Task::none();
+    };
+
     Task::perform(
-        async move { crate::repo::list_items(&pool).await },
+        async move {
+            let total = crate::repo::count_items(&pool, &query, unit, low_only).await?;
+            // Clamp here rather than at the message handlers: deleting the
+            // last item on the last page would otherwise strand the list
+            // on a page that no longer exists.
+            let page_count = (total as f64 / items::PAGE_SIZE as f64).ceil().max(1.0) as i64;
+            let page = page.min(page_count - 1).max(0);
+            let rows = crate::repo::list_items_page(
+                &pool,
+                &query,
+                unit,
+                low_only,
+                items::PAGE_SIZE as i64,
+                page * items::PAGE_SIZE as i64,
+            )
+            .await?;
+            Ok::<_, crate::repo::RepoError>((rows, total, page))
+        },
         |result| Message::ItemsLoaded(result.map_err(|e| e.to_string())),
+    )
+}
+
+/// Refreshes the item pickers from whatever the shopkeeper has typed.
+/// With an empty query this is the first `PICKER_LIMIT` items
+/// alphabetically — a starting point to browse from, not the catalogue.
+fn load_picker(state: &State, query: String) -> Task<Message> {
+    if state.settings.preload_catalogue {
+        let rows = catalogue::search(&state.resident, &query, PICKER_LIMIT as usize);
+        return Task::done(Message::PickerOptionsLoaded(Ok(rows)));
+    }
+
+    let Some(pool) = state.pool.clone() else {
+        return Task::none();
+    };
+    Task::perform(
+        async move { crate::repo::search_items(&pool, &query, PICKER_LIMIT).await },
+        |result| Message::PickerOptionsLoaded(result.map_err(|e| e.to_string())),
+    )
+}
+
+/// Loads the whole catalogue for the in-memory mode. Only ever called
+/// when that mode is on — in the default mode nothing calls this, which
+/// is the entire point of the default.
+fn load_resident(state: &State) -> Task<Message> {
+    if !state.settings.preload_catalogue {
+        return Task::none();
+    }
+    let Some(pool) = state.pool.clone() else {
+        return Task::none();
+    };
+    Task::perform(
+        // `i64::MAX` rather than a special "no limit" path: the query is
+        // the same one every other screen uses, just unbounded.
+        async move { crate::repo::list_items_page(&pool, "", None, false, i64::MAX, 0).await },
+        |result| Message::CatalogueLoaded(result.map_err(|e| e.to_string())),
+    )
+}
+
+/// Loads the low-stock panel's current page and its total.
+fn load_low_stock(state: &State) -> Task<Message> {
+    let page = state.low_stock_page as i64;
+
+    if state.settings.preload_catalogue {
+        let (rows, total, page) = catalogue::low_stock_page(&state.resident, sale::PAGE_SIZE, page.max(0) as usize);
+        return Task::done(Message::LowStockLoaded(Ok((rows, total, page as i64))));
+    }
+
+    let Some(pool) = state.pool.clone() else {
+        return Task::none();
+    };
+
+    Task::perform(
+        async move {
+            let total = crate::repo::low_stock_count(&pool).await?;
+            let page_count = (total as f64 / sale::PAGE_SIZE as f64).ceil().max(1.0) as i64;
+            let page = page.min(page_count - 1).max(0);
+            let rows =
+                crate::repo::low_stock_page(&pool, sale::PAGE_SIZE as i64, page * sale::PAGE_SIZE as i64).await?;
+            Ok::<_, crate::repo::RepoError>((rows, total, page))
+        },
+        |result| Message::LowStockLoaded(result.map_err(|e| e.to_string())),
     )
 }
 
@@ -1239,11 +1561,35 @@ fn load_shop_logo(pool: SqlitePool) -> Task<Message> {
     )
 }
 
+/// Everything that shows items, refreshed together — the Inventory page,
+/// the low-stock panel, and the pickers. Called after any write that
+/// could change what they show.
+/// Finds an item among the ones already on screen — the current
+/// Inventory page, whatever the detail view is showing, or the item the
+/// Sales form has picked.
+///
+/// Every caller opens a form *from* one of those, so the row is always to
+/// hand and this never needs to touch the database. Returning `None`
+/// means the action came from something no longer displayed, in which
+/// case doing nothing is the right answer.
+fn on_screen_item(state: &State, id: i64) -> Option<&Item> {
+    state
+        .items
+        .iter()
+        .chain(state.low_stock.iter())
+        .find(|i| i.id == id)
+        .or_else(|| state.viewing_item.as_ref().filter(|i| i.id == id))
+        .or_else(|| state.sale_item.as_ref().filter(|i| i.id == id))
+}
+
 fn reload_items(state: &State) -> Task<Message> {
-    match state.pool.clone() {
-        Some(pool) => load_items(pool),
-        None => Task::none(),
+    // In the in-memory mode the resident copy is the source the other
+    // three read from, so it has to be refetched first; `CatalogueLoaded`
+    // then re-runs them against it.
+    if state.settings.preload_catalogue {
+        return load_resident(state);
     }
+    Task::batch([load_items(state), load_low_stock(state), load_picker(state, String::new())])
 }
 
 /// Fetches thumbnails for whichever items are on the current item-list

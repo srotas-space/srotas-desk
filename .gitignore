@@ -1,2 +1,7 @@
 /target
 /dist
+
+# macOS Finder metadata. Never useful to anyone else, and it changes every
+# time a folder is opened — which is why it kept showing up as a modified
+# file in `git status`.
+.DS_Store

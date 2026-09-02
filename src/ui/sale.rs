@@ -7,7 +7,7 @@
 //! at the counter can actually act on. Past sales still exist as
 //! transactions and still show up in Reports — bills (Shop → Billings) are
 //! the printable record.
-use iced::widget::{button, column, combo_box, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Element, Length, Task};
 
 use super::{Message, Notice, State};
@@ -45,11 +45,21 @@ impl SaleForm {
     }
 }
 
-pub fn select_item(state: &mut State, option: ItemOption) {
-    if let Some(item) = state.items.iter().find(|i| i.id == option.id) {
-        state.sale_form.price = money::paise_to_input(item.sell_price_paise);
-    }
+/// Records the pick and fetches that one item's details. The catalogue is
+/// no longer in memory, so the stock and prices the Details panel shows
+/// are looked up by id rather than found in a list.
+pub fn select_item(state: &mut State, option: ItemOption) -> Task<Message> {
+    let id = option.id;
     state.sale_form.item = Some(option);
+    state.sale_form.price.clear();
+
+    let Some(pool) = state.pool.clone() else {
+        return Task::none();
+    };
+    Task::perform(
+        async move { crate::repo::get_item(&pool, id).await.map_err(|e| e.to_string()) },
+        Message::SaleItemLoaded,
+    )
 }
 
 pub fn submit(state: &mut State) -> Task<Message> {
@@ -78,18 +88,16 @@ pub fn submit(state: &mut State) -> Task<Message> {
 
 pub const PAGE_SIZE: usize = 10;
 
-/// The low-stock items on the current page, plus that page's (clamped)
-/// index and the total number of pages. Clamping here rather than at the
-/// message handlers means restocking the last item on the last page can't
-/// strand the screen on a page that no longer exists.
-pub fn low_stock_page(state: &State) -> (Vec<&Item>, usize, usize) {
-    let matches: Vec<&Item> = state.items.iter().filter(|item| item.is_low_stock()).collect();
-
-    let page_count = matches.len().div_ceil(PAGE_SIZE).max(1);
-    let page = state.low_stock_page.min(page_count - 1);
-    let visible = matches.into_iter().skip(page * PAGE_SIZE).take(PAGE_SIZE).collect();
-
-    (visible, page, page_count)
+/// The low-stock page currently on screen, its (already clamped) index,
+/// and how many pages that makes.
+///
+/// `state.low_stock` *is* the page — it comes straight from
+/// `repo::low_stock_page`, ordered by how far below threshold each item
+/// is, so the most urgent restock is on page one.
+pub fn low_stock_page(state: &State) -> (&[Item], i64, i64) {
+    let total = state.low_stock_total;
+    let page_count = (total as f64 / PAGE_SIZE as f64).ceil().max(1.0) as i64;
+    (&state.low_stock, state.low_stock_page as i64, page_count)
 }
 
 // ----------------------------------------------------------------- view
@@ -117,9 +125,15 @@ pub fn view(state: &State) -> Element<'_, Message> {
 fn items_panel(state: &State) -> Element<'_, Message> {
     let form = &state.sale_form;
 
-    let item_picker = combo_box(&state.sale_item_combo, "Search item...", form.item.as_ref(), Message::SaleItemSelected)
-        .padding(theme::FIELD_PADDING)
-        .width(Length::Fill);
+    // Typing queries the database rather than filtering a list held in
+    // memory — see `common::item_picker`.
+    let item_picker = common::item_picker(
+        &state.picker,
+        common::PickerTarget::Sale,
+        "Search item...",
+        Message::SaleItemSelected,
+        Length::Fill,
+    );
 
     let body = column![
         text("Items").size(theme::TEXT_HEADING).font(theme::SEMIBOLD),
@@ -157,8 +171,8 @@ fn items_panel(state: &State) -> Element<'_, Message> {
 /// What the shop knows about the picked item, as three figures big enough
 /// to read from across the counter.
 fn details_panel(state: &State) -> Element<'_, Message> {
-    let selected_item =
-        state.sale_form.item.as_ref().and_then(|sel| state.items.iter().find(|i| i.id == sel.id));
+    // Fetched by id when the item was picked — see `select_item`.
+    let selected_item = state.sale_item.as_ref();
 
     // Always visible — zeroed until an item is picked, then reflecting
     // that item's real stock/buy/sell figures.
@@ -226,7 +240,7 @@ fn details_panel(state: &State) -> Element<'_, Message> {
 /// empty space the way the old Sales History did.
 fn low_stock_panel(state: &State) -> Element<'_, Message> {
     let (visible, page, page_count) = low_stock_page(state);
-    let total = state.items.iter().filter(|item| item.is_low_stock()).count();
+    let total = state.low_stock_total;
 
     let mut list = column![].spacing(theme::SPACE_XS);
     if total == 0 {
@@ -240,11 +254,11 @@ fn low_stock_panel(state: &State) -> Element<'_, Message> {
         list = list.push(low_stock_row(item));
     }
 
-    let start = page * PAGE_SIZE;
+    let start = page * PAGE_SIZE as i64;
     let range_label = if total == 0 {
         "0 of 0".to_string()
     } else {
-        format!("{}-{} of {}", start + 1, (start + PAGE_SIZE).min(total), total)
+        format!("{}-{} of {}", start + 1, (start + PAGE_SIZE as i64).min(total), total)
     };
 
     let pagination = row![
@@ -351,72 +365,4 @@ fn tile<'a>(
 
 fn labeled<'a>(label: &'a str, widget: impl Into<Element<'a, Message>>) -> iced::widget::Column<'a, Message> {
     column![text(label).size(theme::TEXT_SMALL).color(theme::MUTED_TEXT), widget.into()].spacing(theme::SPACE_XS)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn item(id: i64, stock: f64, threshold: f64) -> Item {
-        Item {
-            id,
-            name: format!("Item {id}"),
-            buy_price_paise: 1000,
-            sell_price_paise: 2000,
-            stock_qty: stock,
-            unit: "piece".into(),
-            low_stock_threshold: threshold,
-            description: String::new(),
-            location: String::new(),
-            has_image: false,
-            gst_rate_bp: None,
-        }
-    }
-
-    #[test]
-    fn only_items_below_their_threshold_are_listed() {
-        let mut state = State::default();
-        state.items = vec![item(1, 2.0, 5.0), item(2, 9.0, 5.0), item(3, 0.0, 1.0)];
-
-        let (visible, _, _) = low_stock_page(&state);
-        let ids: Vec<i64> = visible.iter().map(|i| i.id).collect();
-        assert_eq!(ids, vec![1, 3]);
-    }
-
-    #[test]
-    fn low_stock_paginates() {
-        let mut state = State::default();
-        state.items = (0..25).map(|i| item(i, 0.0, 1.0)).collect();
-
-        let (visible, page, page_count) = low_stock_page(&state);
-        assert_eq!(visible.len(), PAGE_SIZE);
-        assert_eq!((page, page_count), (0, 3));
-
-        state.low_stock_page = 2;
-        let (visible, page, _) = low_stock_page(&state);
-        assert_eq!(visible.len(), 5);
-        assert_eq!(page, 2);
-    }
-
-    #[test]
-    fn a_stale_page_is_clamped_once_items_are_restocked() {
-        let mut state = State::default();
-        state.items = (0..25).map(|i| item(i, 0.0, 1.0)).collect();
-        state.low_stock_page = 2;
-
-        // Everything but one item gets restocked while the screen sits on
-        // page 3 — it must fall back to the only page there is.
-        state.items = vec![item(1, 0.0, 1.0)];
-        let (visible, page, page_count) = low_stock_page(&state);
-        assert_eq!(visible.len(), 1);
-        assert_eq!((page, page_count), (0, 1));
-    }
-
-    #[test]
-    fn an_empty_catalog_still_reports_one_page() {
-        let state = State::default();
-        let (visible, page, page_count) = low_stock_page(&state);
-        assert!(visible.is_empty());
-        assert_eq!((page, page_count), (0, 1));
-    }
 }

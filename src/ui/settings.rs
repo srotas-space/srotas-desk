@@ -8,6 +8,7 @@ use crate::ui::theme;
 pub enum SettingsTab {
     Profile,
     Security,
+    Performance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +236,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
     let content = match state.settings_tab {
         SettingsTab::Profile => profile_view(state),
         SettingsTab::Security => security_view(state),
+        SettingsTab::Performance => performance_view(state),
     };
 
     let tabs = container(
@@ -242,6 +244,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
             row![
                 tab_button("Profile", SettingsTab::Profile, state.settings_tab),
                 tab_button("Security", SettingsTab::Security, state.settings_tab),
+                tab_button("Performance", SettingsTab::Performance, state.settings_tab),
             ]
             .spacing(theme::SPACE_XS),
         )
@@ -363,6 +366,88 @@ fn logo_placeholder(label: &str) -> Element<'static, Message> {
         .align_x(iced::Alignment::Center)
         .align_y(iced::Alignment::Center)
         .into()
+}
+
+/// How the catalogue is held. Two honest options rather than a hidden
+/// heuristic: the shopkeeper knows their machine and their catalogue
+/// better than a guess baked into the code would.
+fn performance_view(state: &State) -> Element<'_, Message> {
+    let preload = state.settings.preload_catalogue;
+
+    let option = |selected: bool, title: &'static str, detail: &'static str, on: bool| {
+        // The selected card is filled violet, so its text has to be light
+        // — the muted grey used on the unselected cards is unreadable
+        // against it.
+        let (mark_colour, detail_colour) = if selected {
+            (iced::Color::WHITE, iced::Color::from_rgba(1.0, 1.0, 1.0, 0.85))
+        } else {
+            (theme::MUTED_TEXT, theme::MUTED_TEXT)
+        };
+        button(
+            row![
+                text(if selected { "●" } else { "○" }).size(theme::TEXT_BODY).color(mark_colour),
+                column![
+                    text(title).size(theme::TEXT_BODY).font(theme::SEMIBOLD),
+                    text(detail).size(theme::TEXT_SMALL).color(detail_colour),
+                ]
+                .spacing(theme::SPACE_XS),
+            ]
+            .spacing(theme::SPACE_SM)
+            .align_y(iced::Alignment::Start),
+        )
+        .style(if selected { theme::tab_selected } else { theme::secondary_button })
+        .padding(theme::SPACE_MD)
+        .width(Length::Fill)
+        .on_press(Message::PreloadToggled(on))
+    };
+
+    let fields = column![
+        text("Performance").size(theme::TEXT_TITLE).font(theme::SEMIBOLD),
+        text(
+            "How the app gets items onto a screen. Both show the same items — \
+             they differ in when the work happens."
+        )
+        .size(theme::TEXT_SMALL)
+        .color(theme::MUTED_TEXT),
+        option(
+            !preload,
+            "Load items as needed",
+            "Recommended. Each screen asks for just the rows it shows, and searching \
+             queries as you type. Uses very little memory, and works the same whether \
+             you stock fifty items or a hundred thousand.",
+            false,
+        ),
+        option(
+            preload,
+            "Keep the catalogue in memory",
+            "Loads every item once when the app starts, so searching and paging are \
+             instant with no lookup. Uses more memory and makes startup slower — worth \
+             it on a machine with RAM to spare.",
+            true,
+        ),
+        container(
+            column![
+                text(if preload { "Currently: kept in memory" } else { "Currently: loaded as needed" })
+                    .size(theme::TEXT_SMALL)
+                    .font(theme::SEMIBOLD),
+                text(if preload {
+                    "Switching this off frees the memory straight away."
+                } else {
+                    "Nothing is loaded until a screen needs it."
+                })
+                .size(theme::TEXT_SMALL)
+                .color(theme::MUTED_TEXT),
+            ]
+            .spacing(theme::SPACE_XS),
+        )
+        .style(theme::panel)
+        .padding(theme::SPACE_MD)
+        .width(Length::Fill),
+    ]
+    .spacing(theme::SPACE_MD)
+    .max_width(440);
+
+    form_page(fields)
 }
 
 fn security_view(state: &State) -> Element<'_, Message> {

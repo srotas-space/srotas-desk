@@ -1,4 +1,4 @@
-use iced::widget::{button, column, combo_box, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Element, Length, Task};
 use std::path::PathBuf;
 
@@ -79,6 +79,10 @@ pub struct BillsState {
     pub discount_input: String,
     /// Who the bill is made out to. Optional — left blank for a walk-in.
     pub customer_input: String,
+    /// The selected item's GST override, fetched when it was picked. The
+    /// catalogue is no longer in memory, so the rate a line is billed at
+    /// comes from that lookup rather than from a search over every item.
+    pub item_gst_rate_bp: Option<i64>,
 
     pub page: i64,
     pub rows: Vec<BillSummary>,
@@ -92,11 +96,21 @@ fn subtotal_paise(cart: &[CartLine]) -> i64 {
     cart.iter().map(CartLine::line_total_paise).sum()
 }
 
-pub fn select_item(state: &mut State, option: ItemOption) {
-    if let Some(item) = state.items.iter().find(|i| i.id == option.id) {
-        state.bills.price_input = money::paise_to_input(item.sell_price_paise);
-    }
+/// Records the pick and fetches that item's sell price to pre-fill the
+/// line. Looked up by id rather than found in a list — the catalogue is
+/// no longer held in memory.
+pub fn select_item(state: &mut State, option: ItemOption) -> Task<Message> {
+    let id = option.id;
     state.bills.item_selected = Some(option);
+    state.bills.price_input.clear();
+
+    let Some(pool) = state.pool.clone() else {
+        return Task::none();
+    };
+    Task::perform(
+        async move { crate::repo::get_item(&pool, id).await.map_err(|e| e.to_string()) },
+        Message::BillItemLoaded,
+    )
 }
 
 pub fn add_line(state: &mut State) {
@@ -114,17 +128,15 @@ pub fn add_line(state: &mut State) {
     };
 
     let gst_rate_bp = state
-        .items
-        .iter()
-        .find(|i| i.id == selected.id)
-        .and_then(|i| i.gst_rate_bp)
+        .bills
+        .item_gst_rate_bp
         .unwrap_or_else(|| state.shop.as_ref().map(|s| s.gst_rate_bp).unwrap_or(0));
 
     state.bills.cart.push(CartLine { item_id: selected.id, item_name: selected.name, qty, price_paise, gst_rate_bp });
     state.bills.item_selected = None;
+    state.bills.item_gst_rate_bp = None;
     state.bills.qty_input.clear();
     state.bills.price_input.clear();
-    state.bills.customer_input.clear();
     state.notice = None;
 }
 
@@ -138,7 +150,9 @@ pub fn start_new(state: &mut State) {
     state.bills.cart.clear();
     state.bills.editing_id = None;
     state.bills.discount_input.clear();
+    state.bills.customer_input.clear();
     state.bills.item_selected = None;
+    state.bills.item_gst_rate_bp = None;
     state.bills.qty_input.clear();
     state.bills.price_input.clear();
     state.notice = None;
@@ -312,9 +326,13 @@ pub fn view(state: &State) -> Element<'_, Message> {
         None => "New Bill".to_string(),
     };
 
-    let item_picker = combo_box(&state.bill_item_combo, "Search item...", bills.item_selected.as_ref(), Message::BillItemSelected)
-        .padding(10)
-        .width(Length::Fixed(240.0));
+    let item_picker = common::item_picker(
+        &state.picker,
+        common::PickerTarget::Bill,
+        "Search item...",
+        Message::BillItemSelected,
+        Length::Fixed(240.0),
+    );
 
     let customer_row = row![
         labeled(

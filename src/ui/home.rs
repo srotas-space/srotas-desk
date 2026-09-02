@@ -18,7 +18,9 @@ const INVENTORY_SVG: &[u8] = include_bytes!("../../assets/inventory.svg");
 
 pub fn view(state: &State) -> Element<'_, Message> {
     let shop_name = state.shop.as_ref().map(|s| s.shop_name.as_str()).unwrap_or("Srotas Desk");
-    let low_stock = state.items.iter().filter(|i| i.is_low_stock()).count();
+    // Counted in SQL when the shop loads, not by walking a catalogue
+    // held in memory — see `repo::low_stock_count`.
+    let low_stock = state.low_stock_total;
 
     let mut heading = column![
         text(format!("Welcome, {shop_name}")).size(theme::TEXT_DISPLAY).font(theme::SEMIBOLD),

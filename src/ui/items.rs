@@ -91,10 +91,13 @@ impl UnitFilter {
     pub const ALL: [UnitFilter; 4] =
         [UnitFilter::All, UnitFilter::Only(Unit::Piece), UnitFilter::Only(Unit::Kg), UnitFilter::Only(Unit::Metre)];
 
-    fn matches(self, item: &Item) -> bool {
+    /// The unit to filter on, or `None` for "all units" — the shape the
+    /// SQL query wants, now that filtering happens in the database rather
+    /// than over a list held in memory.
+    pub fn as_unit(self) -> Option<Unit> {
         match self {
-            UnitFilter::All => true,
-            UnitFilter::Only(unit) => item.unit == unit.as_str(),
+            UnitFilter::All => None,
+            UnitFilter::Only(unit) => Some(unit),
         }
     }
 }
@@ -352,8 +355,10 @@ pub fn view(state: &State) -> Element<'_, Message> {
         let default_gst_bp = state.shop.as_ref().map(|s| s.gst_rate_bp).unwrap_or(0);
         return form_view(form, default_gst_bp);
     }
-    if let Some(id) = state.viewing_item_id {
-        if let Some(item) = state.items.iter().find(|i| i.id == id) {
+    if state.viewing_item_id.is_some() {
+        // Fetched by id when the row was opened — the list page it came
+        // from holds only a screenful and may not include it any more.
+        if let Some(item) = &state.viewing_item {
             let default_gst_bp = state.shop.as_ref().map(|s| s.gst_rate_bp).unwrap_or(0);
             return detail_view(item, state.view_image.as_deref(), default_gst_bp);
         }
@@ -361,28 +366,17 @@ pub fn view(state: &State) -> Element<'_, Message> {
     list_view(state)
 }
 
-/// The current search/filter/pagination applied to `state.items` — shared
-/// between `list_view` (to render it) and `ui::mod`'s thumbnail loader (to
-/// know which items are actually on screen right now, since thumbnails are
-/// only ever fetched for the visible page — see `Item`'s doc comment on
-/// why photo bytes never ride along with the bulk item list).
-pub fn current_page(state: &State) -> (Vec<&Item>, usize, usize) {
-    let query = state.search_query.trim().to_lowercase();
-    let filtered: Vec<&Item> = state
-        .items
-        .iter()
-        .filter(|item| query.is_empty() || item.name.to_lowercase().contains(&query))
-        .filter(|item| state.unit_filter.matches(item))
-        .filter(|item| !state.low_stock_only || item.is_low_stock())
-        .collect();
-
-    let total = filtered.len();
-    let page_count = total.div_ceil(PAGE_SIZE).max(1);
-    let page = state.items_page.min(page_count - 1);
-    let start = page * PAGE_SIZE;
-    let page_items = filtered.into_iter().skip(start).take(PAGE_SIZE).collect();
-
-    (page_items, total, page_count)
+/// The page currently on screen, its total, and how many pages that
+/// makes.
+///
+/// `state.items` *is* the page — searching, filtering and paging all
+/// happen in SQL now (see `repo::list_items_page`), so this no longer
+/// walks the catalogue. Kept as a function because `ui::mod`'s thumbnail
+/// loader asks the same question: which items are visible right now.
+pub fn current_page(state: &State) -> (Vec<&Item>, i64, i64) {
+    let total = state.items_total;
+    let page_count = (total as f64 / PAGE_SIZE as f64).ceil().max(1.0) as i64;
+    (state.items.iter().collect(), total, page_count)
 }
 
 fn list_view(state: &State) -> Element<'_, Message> {
@@ -418,8 +412,8 @@ fn list_view(state: &State) -> Element<'_, Message> {
     .padding([0.0, theme::SPACE_SM]);
 
     let (page_items, total, page_count) = current_page(state);
-    let page = state.items_page.min(page_count - 1);
-    let start = page * PAGE_SIZE;
+    let page = state.items_page as i64;
+    let start = page * PAGE_SIZE as i64;
 
     let mut list = column![].spacing(theme::SPACE_SM).padding(theme::SPACE_MD);
     for item in &page_items {
@@ -433,7 +427,7 @@ fn list_view(state: &State) -> Element<'_, Message> {
     let range_label = if total == 0 {
         "0 of 0".to_string()
     } else {
-        format!("{}-{} of {}", start + 1, (start + PAGE_SIZE).min(total), total)
+        format!("{}-{} of {}", start + 1, (start + PAGE_SIZE as i64).min(total), total)
     };
 
     let pagination = row![
@@ -704,64 +698,4 @@ fn stat_tile<'a>(label: &'a str, value: String) -> Element<'a, Message> {
 
 fn labeled<'a>(label: &'a str, widget: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     column![text(label).size(14), widget.into()].spacing(4).into()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn item(id: i64, name: &str, has_image: bool) -> Item {
-        Item {
-            id,
-            name: name.to_string(),
-            buy_price_paise: 0,
-            sell_price_paise: 0,
-            stock_qty: 10.0,
-            unit: "piece".to_string(),
-            low_stock_threshold: 5.0,
-            description: String::new(),
-            location: String::new(),
-            has_image,
-            gst_rate_bp: None,
-        }
-    }
-
-    #[test]
-    fn current_page_paginates_and_reports_the_right_totals() {
-        let mut state = State::default();
-        state.items = (1..=25).map(|id| item(id, &format!("Item {id}"), false)).collect();
-
-        let (page_items, total, page_count) = current_page(&state);
-        assert_eq!(total, 25);
-        assert_eq!(page_count, 3);
-        assert_eq!(page_items.len(), PAGE_SIZE);
-        assert_eq!(page_items[0].id, 1);
-
-        state.items_page = 2;
-        let (last_page, _, _) = current_page(&state);
-        assert_eq!(last_page.len(), 5); // 25 items, 10 per page -> 5 on the last page
-        assert_eq!(last_page[0].id, 21);
-    }
-
-    #[test]
-    fn current_page_applies_search_and_low_stock_filters_before_paginating() {
-        let mut state = State::default();
-        state.items = vec![item(1, "PVC Pipe", false), item(2, "Copper Wire", false), item(3, "PVC Elbow", false)];
-        state.search_query = "pvc".to_string();
-
-        let (page_items, total, _) = current_page(&state);
-        assert_eq!(total, 2);
-        assert!(page_items.iter().all(|i| i.name.to_lowercase().contains("pvc")));
-    }
-
-    #[test]
-    fn current_page_clamps_a_stale_page_number_after_the_result_set_shrinks() {
-        let mut state = State::default();
-        state.items = vec![item(1, "A", false), item(2, "B", false)];
-        state.items_page = 5; // stale — e.g. a filter just removed most matches
-
-        let (page_items, _, page_count) = current_page(&state);
-        assert_eq!(page_count, 1);
-        assert_eq!(page_items.len(), 2);
-    }
 }
