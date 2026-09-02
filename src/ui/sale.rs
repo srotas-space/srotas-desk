@@ -52,14 +52,26 @@ pub fn select_item(state: &mut State, option: ItemOption) -> Task<Message> {
     let id = option.id;
     state.sale_form.item = Some(option);
     state.sale_form.price.clear();
+    state.sale_item_image = None;
 
     let Some(pool) = state.pool.clone() else {
         return Task::none();
     };
-    Task::perform(
-        async move { crate::repo::get_item(&pool, id).await.map_err(|e| e.to_string()) },
-        Message::SaleItemLoaded,
-    )
+    let for_image = pool.clone();
+
+    // Two fetches rather than one: the photo is a BLOB that deliberately
+    // never rides along with an item row, so it is asked for separately
+    // and only for the single item on screen.
+    Task::batch([
+        Task::perform(
+            async move { crate::repo::get_item(&pool, id).await.map_err(|e| e.to_string()) },
+            Message::SaleItemLoaded,
+        ),
+        Task::perform(
+            async move { crate::repo::get_item_image(&for_image, id).await.unwrap_or(None) },
+            move |image| Message::SaleItemImageLoaded(id, image),
+        ),
+    ])
 }
 
 pub fn submit(state: &mut State) -> Task<Message> {
@@ -225,8 +237,11 @@ fn details_panel(state: &State) -> Element<'_, Message> {
             // Where to walk to. Set in Inventory; the tile reads "Not
             // recorded" until somebody fills it in.
             stat_text("Kept at", location_value),
+            // Last in the row, so the figures a shopkeeper is billing from
+            // read left to right before the picture of the thing itself.
+            photo_tile(state.sale_item_image.as_deref()),
         ]
-        .spacing(theme::SPACE_MD)
+        .spacing(theme::SPACE_SM)
         .width(Length::Fill),
         status,
     ]
@@ -234,6 +249,40 @@ fn details_panel(state: &State) -> Element<'_, Message> {
 
     container(body).style(theme::card).padding(theme::SPACE_MD).width(Length::Fill).into()
 }
+
+/// The picked item's photo, shaped like the stat tiles beside it.
+///
+/// Always drawn, even with no photo to show — the other four tiles are
+/// always there too, and a row that changed from five tiles to four
+/// depending on the item would reflow every time the selection changed.
+fn photo_tile(image: Option<&[u8]>) -> Element<'_, Message> {
+    let inner: Element<'_, Message> = match image {
+        Some(bytes) => iced::widget::image::Image::new(iced::widget::image::Handle::from_bytes(bytes.to_vec()))
+            .width(PHOTO_SIZE)
+            .height(PHOTO_SIZE)
+            .content_fit(iced::ContentFit::Contain)
+            .into(),
+        None => container(text("No photo").size(theme::TEXT_CAPTION).color(theme::MUTED_TEXT))
+            .width(PHOTO_SIZE)
+            .height(PHOTO_SIZE)
+            .align_x(iced::Alignment::Center)
+            .align_y(iced::Alignment::Center)
+            .into(),
+    };
+
+    container(
+        column![text("PHOTO").size(theme::TEXT_CAPTION).color(theme::MUTED_TEXT), inner]
+            .spacing(theme::SPACE_XS),
+    )
+    .style(theme::panel)
+    .padding(theme::SPACE_SM)
+    .width(Length::FillPortion(1))
+    .into()
+}
+
+/// How large the picked item's photo is drawn — sized to sit level with
+/// the stat tiles beside it rather than tower over them.
+const PHOTO_SIZE: f32 = 56.0;
 
 /// Everything the shop is about to run out of. Takes the rest of the
 /// window, so the page fills its height rather than trailing off into
@@ -333,14 +382,14 @@ fn low_stock_row(item: &Item) -> Element<'_, Message> {
 /// share of the width — three of these read as a dashboard, where three
 /// bare label/value pairs read as a caption.
 fn stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
-    tile(label, value, 26.0, theme::VIOLET, theme::BOLD)
+    tile(label, value, 20.0, theme::VIOLET, theme::BOLD)
 }
 
 /// Same tile, but for a value that is words rather than a figure — a shelf
 /// name set at 26pt violet would shout louder than the numbers beside it
 /// and wrap out of its tile besides.
 fn stat_text<'a>(label: &'a str, value: String) -> Element<'a, Message> {
-    tile(label, value, theme::TEXT_HEADING, theme::INK, theme::SEMIBOLD)
+    tile(label, value, theme::TEXT_BODY, theme::INK, theme::SEMIBOLD)
 }
 
 fn tile<'a>(
@@ -358,7 +407,7 @@ fn tile<'a>(
         .spacing(theme::SPACE_XS),
     )
     .style(theme::panel)
-    .padding(theme::SPACE_MD)
+    .padding(theme::SPACE_SM)
     .width(Length::FillPortion(1))
     .into()
 }

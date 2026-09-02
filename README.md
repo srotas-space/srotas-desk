@@ -128,7 +128,7 @@ version is what tells a shopkeeper which build they're running.
 
 ```bash
 git add .
-git commit -m ".gitignore update to 0.1.6"
+git commit -m "photo added too 0.1.7"
 git push origin main
 ```
 
@@ -142,8 +142,8 @@ cargo test
 ### 4. Tag and push
 
 ```bash
-git tag v0.1.6
-git push origin v0.1.6
+git tag v0.1.7
+git push origin v0.1.7
 ```
 
 **This is the point of no return for that version number.** CI publishes

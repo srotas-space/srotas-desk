@@ -120,6 +120,10 @@ pub struct State {
     /// Whichever item the Sales form has selected, fetched when it is
     /// picked so the Details panel has its stock and prices.
     sale_item: Option<Item>,
+    /// The picked item's photo, fetched alongside it — image bytes never
+    /// ride along with an item row (see `Item`'s doc comment), so this is
+    /// a second, deliberate fetch made only for the one item on screen.
+    sale_item_image: Option<Vec<u8>>,
     /// What the item pickers have been typed into, and the candidates
     /// that came back. Shared by Sales, Billings and Reports — one query,
     /// one result set, whichever screen asked.
@@ -203,6 +207,7 @@ impl Default for State {
             items_total: 0,
             viewing_item: None,
             sale_item: None,
+            sale_item_image: None,
             picker: common::PickerState::default(),
             low_stock: Vec::new(),
             low_stock_total: 0,
@@ -341,6 +346,8 @@ pub enum Message {
     /// No-op target for keyboard events the global subscription below
     /// looked at but didn't recognize as a shortcut.
     NoOp,
+    /// Clears the notice under the header.
+    NoticeDismissed,
     UndoRequested,
     RedoRequested,
     FocusNext,
@@ -368,6 +375,7 @@ pub enum Message {
     PickerInputChanged(common::PickerTarget, String),
     ViewItemLoaded(Result<Option<Item>, String>),
     SaleItemLoaded(Result<Option<Item>, String>),
+    SaleItemImageLoaded(i64, Option<Vec<u8>>),
     BillItemLoaded(Result<Option<Item>, String>),
     ThumbnailLoaded(i64, Option<Vec<u8>>),
 
@@ -580,6 +588,10 @@ fn keyboard_shortcuts() -> iced::Subscription<Message> {
 fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::NoOp => Task::none(),
+        Message::NoticeDismissed => {
+            state.notice = None;
+            Task::none()
+        }
         Message::UndoRequested => {
             undo(state);
             Task::none()
@@ -750,6 +762,14 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 }
             }
             state.sale_item = item;
+            Task::none()
+        }
+        Message::SaleItemImageLoaded(id, image) => {
+            // Ignore a photo that arrived after the shopkeeper moved on to
+            // a different item.
+            if state.sale_form.item.as_ref().map(|i| i.id) == Some(id) {
+                state.sale_item_image = image;
+            }
             Task::none()
         }
         Message::SaleItemLoaded(Err(e)) => {
@@ -1069,7 +1089,13 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::SubmitSale => sale::submit(state),
         Message::SaleRecorded(Ok(_)) => {
             state.notice = Some(Notice::success("Sale recorded."));
+            // Clear the whole selection, not just the form: leaving the
+            // sold item's stats and photo on the Details panel would show
+            // stock that is now out of date.
             state.sale_form = sale::SaleForm::default();
+            state.sale_item = None;
+            state.sale_item_image = None;
+            state.picker.clear();
             reload_items(state)
         }
         Message::SaleRecorded(Err(e)) => {
@@ -1624,33 +1650,38 @@ fn fetch_thumbnails(state: &State, ids: Vec<i64>) -> Task<Message> {
 }
 
 fn view(state: &State) -> Element<'_, Message> {
-    let content: Element<'_, Message> = match state.stage {
-        Stage::Loading => loading_view(),
-        Stage::Activation => activation::view(state),
-        Stage::Register => register::view(state),
-        Stage::Login => login::view(state),
-        Stage::Home => column![app_bar(state, false), home::view(state)]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
-        Stage::Inventory => column![app_bar(state, true), inventory_tabs(state), inventory_content(state)]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
-        Stage::Shop => column![app_bar(state, true), shop_tabs(state), shop_content(state)]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
-        Stage::Settings => column![app_bar(state, true), settings::view(state)]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
+    // The app bar is hoisted out of the individual screens so the notice
+    // can sit directly beneath it. On the screens that have no app bar
+    // (activation, registration, the lock screen) the notice simply takes
+    // the top of the window instead.
+    let (app_bar_element, body): (Option<Element<'_, Message>>, Element<'_, Message>) = match state.stage {
+        Stage::Loading => (None, loading_view()),
+        Stage::Activation => (None, activation::view(state)),
+        Stage::Register => (None, register::view(state)),
+        Stage::Login => (None, login::view(state)),
+        Stage::Home => (Some(app_bar(state, false)), home::view(state)),
+        Stage::Inventory => (
+            Some(app_bar(state, true)),
+            column![inventory_tabs(state), inventory_content(state)]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into(),
+        ),
+        Stage::Shop => (
+            Some(app_bar(state, true)),
+            column![shop_tabs(state), shop_content(state)].width(Length::Fill).height(Length::Fill).into(),
+        ),
+        Stage::Settings => (Some(app_bar(state, true)), settings::view(state)),
     };
 
-    let mut screen = column![container(content).width(Length::Fill).height(Length::Fill)];
-    if let Some(notice) = &state.notice {
-        screen = screen.push(status_bar(notice));
+    let mut screen = column![];
+    if let Some(bar) = app_bar_element {
+        screen = screen.push(bar);
     }
+    if let Some(notice) = &state.notice {
+        screen = screen.push(notice_bar(notice));
+    }
+    screen = screen.push(container(body).width(Length::Fill).height(Length::Fill));
 
     screen.width(Length::Fill).height(Length::Fill).into()
 }
@@ -1674,7 +1705,7 @@ fn loading_view() -> Element<'static, Message> {
 /// The bottom status strip. It only takes up space when there's something
 /// to say, and it's tinted by severity — a saved backup shouldn't look
 /// like a failure, which is exactly how it used to read.
-fn status_bar(notice: &Notice) -> Element<'_, Message> {
+fn notice_bar(notice: &Notice) -> Element<'_, Message> {
     let (style, icon): (fn(&iced::Theme) -> iced::widget::container::Style, &str) = match notice.kind {
         NoticeKind::Error => (theme::notice_error, "!"),
         NoticeKind::Success => (theme::notice_success, "\u{2713}"),
@@ -1686,6 +1717,14 @@ fn status_bar(notice: &Notice) -> Element<'_, Message> {
             row![
                 text(icon).size(theme::TEXT_BODY).font(theme::BOLD),
                 text(&notice.text).size(theme::TEXT_SMALL),
+                iced::widget::space::horizontal(),
+                // Dismissable, because a notice sitting under the header
+                // is in the way in a manner one at the foot of the window
+                // never was.
+                button(text("\u{2715}").size(theme::TEXT_SMALL))
+                    .style(theme::link_button)
+                    .padding([2, 6])
+                    .on_press(Message::NoticeDismissed),
             ]
             .spacing(theme::SPACE_SM)
             .align_y(iced::Alignment::Center),
