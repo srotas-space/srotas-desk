@@ -25,7 +25,15 @@ pub use items::ItemForm;
 
 /// Embedded at compile time so the running app never depends on the
 /// project's asset files still being at some relative path on disk.
-const LOGO_SVG: &[u8] = include_bytes!("../../assets/logo.svg");
+/// The product mark, in two cuts. The full one carries the logo's ripple
+/// rings; the compact one drops them so the shopfront can fill the frame.
+///
+/// Which to use is a question of size, not preference: at the 34px the app
+/// bar draws, the rings collapse into a smudge and the shop inside them is
+/// illegible against the violet header. Above ~60px the rings read, and
+/// they are what ties the mark to `logo.svg`.
+const LOGO_SVG: &[u8] = include_bytes!("../../assets/desk-mark.svg");
+const LOGO_COMPACT_SVG: &[u8] = include_bytes!("../../assets/desk-mark-compact.svg");
 const ICON_PNG: &[u8] = include_bytes!("../../assets/icon.png");
 
 /// The bundled typeface, in the three weights the app uses. Registered at
@@ -37,6 +45,11 @@ const FONT_BOLD: &[u8] = include_bytes!("../../assets/fonts/Inter-Bold.ttf");
 
 fn logo_handle() -> svg::Handle {
     svg::Handle::from_memory(LOGO_SVG)
+}
+
+/// The mark for small placements — see `LOGO_COMPACT_SVG`.
+fn logo_handle_small() -> svg::Handle {
+    svg::Handle::from_memory(LOGO_COMPACT_SVG)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1753,7 +1766,7 @@ fn app_bar(state: &State, show_home: bool) -> Element<'_, Message> {
             .height(34)
             .content_fit(iced::ContentFit::Cover)
             .into(),
-        None => svg(logo_handle()).width(34).height(34).into(),
+        None => svg(logo_handle_small()).width(34).height(34).into(),
     };
 
     // Shop name and the current screen stack vertically: the name is the

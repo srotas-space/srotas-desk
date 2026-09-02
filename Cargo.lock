@@ -4621,7 +4621,7 @@ dependencies = [
 
 [[package]]
 name = "srotas-desk"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "argon2",
  "base64",
