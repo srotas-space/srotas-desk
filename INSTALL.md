@@ -127,29 +127,33 @@ rm -f ~/Library/Preferences/srotas-desk.plist
 To get it into the Start menu, right-click the `.exe` → **Show more
 options** → **Pin to Start**.
 
-**If the window opens and closes straight away**, the app crashed on
-startup. It writes down why — open this file and send us what's in it:
+**If the window opens and closes straight away**, the app hit a graphics
+failure — the commonest cause on Windows, from an old driver, a virtual
+machine, or a remote-desktop session taking the GPU away.
+
+**Just open it again.** The app notices that kind of crash and switches
+itself to software rendering on the next launch. Redraws are a little
+slower; nothing else changes. It retries the GPU by itself when you next
+update the app, in case the driver situation has improved since.
+
+If it still won't stay open, it wrote down why. Send us this file:
 
 ```
 %APPDATA%\srotas-desk\crash.log
 ```
 
-(Paste that into the Explorer address bar, or into Run with Win+R.) The
-file only exists if the app has actually crashed.
+(Paste that into the Explorer address bar, or into Run with Win+R.) It
+only exists if the app has actually crashed.
 
-Two things worth trying first, both one-off:
+Two more things worth trying:
 
 ```powershell
-# 1. Force the software renderer — fixes it on machines whose graphics
-#    drivers can't give the app the 3D surface it normally asks for.
+# Force software rendering by hand, without waiting for a crash first.
 $env:ICED_BACKEND = "tiny-skia"; .\srotas-desk.exe
 
-# 2. Unblock the file, in case Windows quarantined the download.
+# Unblock the file, in case Windows quarantined the download.
 Unblock-File .\srotas-desk.exe
 ```
-
-If the software renderer works, keep it: set `ICED_BACKEND` to
-`tiny-skia` permanently under System Properties → Environment Variables.
 
 **Uninstall** — there's no installer, so nothing appears in "Add or
 remove programs". Delete two things:

@@ -128,7 +128,7 @@ version is what tells a shopkeeper which build they're running.
 
 ```bash
 git add .
-git commit -m "logo changes"
+git commit -m "windows platform issue fixes"
 git push origin main
 ```
 
@@ -142,8 +142,8 @@ cargo test
 ### 4. Tag and push
 
 ```bash
-git tag v0.1.9
-git push origin v0.1.9
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 **This is the point of no return for that version number.** CI publishes
@@ -241,3 +241,23 @@ dependencies. [`LICENSE`](LICENSE) lists them.
   testing a build you can't run natively, and the release checklist.
 - **`demo.sh` / `reset.sh`** — fill a development install with 100,000
   demo items, or wipe it back to a blank slate. Both take `--help`.
+
+
+
+
+What I need you to do
+
+  Install the new build and run it once. Then open:
+
+  %APPDATA%\srotas-desk\crash.log
+
+  Paste that into Explorer's address bar or Win+R. Send me what's in it and I can fix the actual cause.
+
+  Two things worth trying first, either of which may just work:
+
+  # Software renderer — the likeliest culprit is graphics drivers that
+  # can't give the app the 3D surface it normally asks for
+  $env:ICED_BACKEND = "tiny-skia"; .\srotas-desk.exe
+
+  # In case Windows quarantined the download
+  Unblock-File .\srotas-desk.exe
