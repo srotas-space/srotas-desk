@@ -1,0 +1,49 @@
+<svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!--
+    Srotas Desk — the compact mark, for small sizes.
+
+    `desk-mark.svg` inherits the logo's three ripple rings, and at a
+    favicon's size those rings claim most of the canvas and squeeze the
+    shop down to a smudge. This drops them and lets the core fill the
+    frame: the same gradient, the same shopfront, legible at 32px.
+
+    Use `desk-mark.svg` where there is room to breathe — a splash screen, a
+    README header — and this one for icons, tabs and list rows.
+  -->
+  <defs>
+    <linearGradient id="core" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7c3aed"/><stop offset=".5" stop-color="#ec4899"/><stop offset="1" stop-color="#fb923c"/>
+    </linearGradient>
+  </defs>
+
+  <!-- A squircle rather than a circle: it reads as an app icon, and it
+       gives the shopfront more width than a disc of the same height. -->
+  <rect width="512" height="512" rx="116" fill="url(#core)"/>
+
+  <g fill="#ffffff">
+    <!-- Awning. Four scallops rather than five — at 32px a fifth becomes
+         noise rather than detail. -->
+    <path d="M104 150 H408 V196
+             a38 38 0 0 1 -76 0
+             a38 38 0 0 1 -76 0
+             a38 38 0 0 1 -76 0
+             a38 38 0 0 1 -76 0 Z"/>
+
+    <!-- Uprights and floor. -->
+    <rect x="106" y="204" width="32" height="188" rx="8"/>
+    <rect x="374" y="204" width="32" height="188" rx="8"/>
+    <rect x="88"  y="384" width="336" height="30" rx="15"/>
+
+    <!-- Two cartons, each with a lid seam and a strip of tape, and a gap
+         between them: set flush they fuse into one white mass and stop
+         reading as two boxes at all. -->
+    <path fill-rule="evenodd"
+          d="M172 268 h106 a12 12 0 0 1 12 12 v104 h-130 v-104 a12 12 0 0 1 12 -12 Z
+             M160 300 h130 v11 h-130 Z
+             M219 268 h11 v32 h-11 Z"/>
+    <path fill-rule="evenodd"
+          d="M318 318 h36 a12 12 0 0 1 12 12 v54 h-60 v-54 a12 12 0 0 1 12 -12 Z
+             M306 346 h60 v10 h-60 Z
+             M331 318 h10 v28 h-10 Z"/>
+  </g>
+</svg>

@@ -54,12 +54,16 @@
     <rect x="624" y="474" width="26" height="172" rx="6"/>
     <rect x="386" y="640" width="278" height="24" rx="12"/>
 
-    <!-- Stock on the floor: a tall carton and a short one, each with its
-         seam left open so the gradient reads through and they don't fuse
-         into one white slab. -->
-    <path d="M446 552 h96 a8 8 0 0 1 8 8 v80 h-112 v-80 a8 8 0 0 1 8 -8 Z
-             M488 552 v88 h8 v-88 Z" fill-rule="evenodd"/>
-    <path d="M566 586 h52 v54 h-68 v-38 a16 16 0 0 1 16 -16 Z
-             M588 586 v54 h8 v-54 Z" fill-rule="evenodd"/>
+    <!-- Stock on the floor: two cartons. Each carries a lid seam and a
+         short strip of tape, knocked through to the gradient — without
+         them a white rectangle reads as a book or a bar, not a box. -->
+    <path fill-rule="evenodd"
+          d="M450 548 h98 a10 10 0 0 1 10 10 v82 h-118 v-82 a10 10 0 0 1 10 -10 Z
+             M440 574 h118 v9 h-118 Z
+             M494 548 h9 v26 h-9 Z"/>
+    <path fill-rule="evenodd"
+          d="M580 590 h30 a10 10 0 0 1 10 10 v40 h-50 v-40 a10 10 0 0 1 10 -10 Z
+             M570 612 h50 v8 h-50 Z
+             M591 590 h8 v22 h-8 Z"/>
   </g>
 </svg>

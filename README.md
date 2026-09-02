@@ -128,7 +128,8 @@ version is what tells a shopkeeper which build they're running.
 
 ```bash
 git add .
-git commit -m "photo added too 0.1.7"
+git commit -m "windows platform fixes 0.1.8"
+git commit -m "Paged loading, DB-backed item search, Windows crash log"
 git push origin main
 ```
 

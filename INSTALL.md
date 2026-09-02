@@ -127,6 +127,30 @@ rm -f ~/Library/Preferences/srotas-desk.plist
 To get it into the Start menu, right-click the `.exe` → **Show more
 options** → **Pin to Start**.
 
+**If the window opens and closes straight away**, the app crashed on
+startup. It writes down why — open this file and send us what's in it:
+
+```
+%APPDATA%\srotas-desk\crash.log
+```
+
+(Paste that into the Explorer address bar, or into Run with Win+R.) The
+file only exists if the app has actually crashed.
+
+Two things worth trying first, both one-off:
+
+```powershell
+# 1. Force the software renderer — fixes it on machines whose graphics
+#    drivers can't give the app the 3D surface it normally asks for.
+$env:ICED_BACKEND = "tiny-skia"; .\srotas-desk.exe
+
+# 2. Unblock the file, in case Windows quarantined the download.
+Unblock-File .\srotas-desk.exe
+```
+
+If the software renderer works, keep it: set `ICED_BACKEND` to
+`tiny-skia` permanently under System Properties → Environment Variables.
+
 **Uninstall** — there's no installer, so nothing appears in "Add or
 remove programs". Delete two things:
 

@@ -25,10 +25,10 @@ pub struct Settings {
 }
 
 fn settings_path() -> PathBuf {
-    let mut dir = crate::db::db_path();
-    dir.pop(); // drop "shop.db", keep the app data directory
-    dir.push("settings.txt");
-    dir
+    // Falls back to the working directory if the OS has no app-data folder
+    // — settings are a convenience, and losing them is not worth refusing
+    // to start over.
+    crate::db::data_dir().unwrap_or_default().join("settings.txt")
 }
 
 pub fn load() -> Settings {
