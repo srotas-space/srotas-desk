@@ -1,0 +1,65 @@
+<svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1050 1050" width="1050" height="1050">
+  <!--
+    Srotas Desk — the product mark.
+
+    Built from `logo.svg` rather than beside it: the glow, the three ripple
+    rings and the violet → pink → orange gradient are carried over
+    unchanged, so this reads as the same family at a glance. What changes
+    is the core. Where the logo has a plain gradient disc, this one holds a
+    shopfront with stock on its shelves — the app's whole subject in one
+    glyph.
+
+    Knocked out in white rather than drawn in outline, so it survives being
+    shrunk to a favicon: at 32px the awning and the boxes still read, where
+    hairlines would silt up.
+  -->
+  <defs>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="matrix(525,0,0,525,525,525)">
+      <stop offset="0" stop-color="#ec4899" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#7c3aed" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ring1" x2="1" gradientUnits="userSpaceOnUse" gradientTransform="matrix(903,0,0,903,73.5,73.5)">
+      <stop offset="0" stop-color="#7c3aed"/><stop offset=".5" stop-color="#ec4899"/><stop offset="1" stop-color="#fb923c"/>
+    </linearGradient>
+    <linearGradient id="ring2" x2="1" gradientUnits="userSpaceOnUse" gradientTransform="matrix(693,0,0,693,178.5,178.5)">
+      <stop offset="0" stop-color="#7c3aed"/><stop offset=".5" stop-color="#ec4899"/><stop offset="1" stop-color="#fb923c"/>
+    </linearGradient>
+    <linearGradient id="ring3" x2="1" gradientUnits="userSpaceOnUse" gradientTransform="matrix(546,0,0,546,252,252)">
+      <stop offset="0" stop-color="#7c3aed"/><stop offset=".5" stop-color="#ec4899"/><stop offset="1" stop-color="#fb923c"/>
+    </linearGradient>
+    <linearGradient id="core" x2="1" gradientUnits="userSpaceOnUse" gradientTransform="matrix(483,0,0,483,283.5,283.5)">
+      <stop offset="0" stop-color="#7c3aed"/><stop offset=".5" stop-color="#ec4899"/><stop offset="1" stop-color="#fb923c"/>
+    </linearGradient>
+  </defs>
+
+  <!-- The logo's own rings, carried over so the two marks read as a pair. -->
+  <circle cx="525" cy="525" r="525" fill="url(#glow)"/>
+  <circle cx="525" cy="525" r="451.5" fill="none" stroke="url(#ring1)" stroke-width="6.6" opacity=".7"/>
+  <circle cx="525" cy="525" r="346.5" fill="none" stroke="url(#ring2)" stroke-width="6.6" opacity=".85"/>
+  <circle cx="525" cy="525" r="273"   fill="none" stroke="url(#ring3)" stroke-width="6.6"/>
+  <circle cx="525" cy="525" r="241.5" fill="url(#core)"/>
+
+  <!-- The shop, knocked out of the core disc. -->
+  <g fill="#ffffff">
+    <!-- Awning: a scalloped valance, the one shape that says "shop" on its own. -->
+    <path d="M398 430 H652 V468
+             a25.4 25.4 0 0 1 -50.8 0
+             a25.4 25.4 0 0 1 -50.8 0
+             a25.4 25.4 0 0 1 -50.8 0
+             a25.4 25.4 0 0 1 -50.8 0
+             a25.4 25.4 0 0 1 -50.8 0 Z"/>
+
+    <!-- Shopfront uprights and floor, framing the stock inside. -->
+    <rect x="400" y="474" width="26" height="172" rx="6"/>
+    <rect x="624" y="474" width="26" height="172" rx="6"/>
+    <rect x="386" y="640" width="278" height="24" rx="12"/>
+
+    <!-- Stock on the floor: a tall carton and a short one, each with its
+         seam left open so the gradient reads through and they don't fuse
+         into one white slab. -->
+    <path d="M446 552 h96 a8 8 0 0 1 8 8 v80 h-112 v-80 a8 8 0 0 1 8 -8 Z
+             M488 552 v88 h8 v-88 Z" fill-rule="evenodd"/>
+    <path d="M566 586 h52 v54 h-68 v-38 a16 16 0 0 1 16 -16 Z
+             M588 586 v54 h8 v-54 Z" fill-rule="evenodd"/>
+  </g>
+</svg>
