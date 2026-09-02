@@ -1,6 +1,6 @@
 [package]
 name = "srotas-desk"
-version = "0.1.3"
+version = "0.1.6"
 edition = "2024"
 description = "Offline inventory and billing for a single hardware shop counter"
 homepage = "https://srotas.space"
