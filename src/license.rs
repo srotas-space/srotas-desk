@@ -34,7 +34,13 @@ const PUBLIC_KEY_BYTES: [u8; 32] = [
 
 #[derive(Debug, Clone)]
 pub struct LicensePayload {
+    // The app only acts on `expires_at`; these two are carried so the tests
+    // can assert this decoder agrees with the backend's signer field for
+    // field. Dropping them would quietly narrow that cross-compatibility
+    // check to "the signature verified", which is the easy half.
+    #[allow(dead_code)]
     pub shop_name: String,
+    #[allow(dead_code)]
     pub issued_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
 }

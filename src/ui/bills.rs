@@ -1,13 +1,14 @@
-use iced::widget::{button, column, combo_box, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, combo_box, container, row, scrollable, text};
 use iced::{Element, Length, Task};
 use std::path::PathBuf;
 
-use super::{Message, State};
+use super::{Message, Notice, State};
 use crate::money;
 use crate::models::{BillDetail, BillSummary};
 use crate::repo::BillLineInput;
 use crate::ui::common::ItemOption;
-use crate::ui::theme;
+use crate::pdf;
+use crate::ui::{common, theme};
 
 pub const PAGE_SIZE: i64 = 10;
 
@@ -76,6 +77,8 @@ pub struct BillsState {
     pub qty_input: String,
     pub price_input: String,
     pub discount_input: String,
+    /// Who the bill is made out to. Optional — left blank for a walk-in.
+    pub customer_input: String,
 
     pub page: i64,
     pub rows: Vec<BillSummary>,
@@ -98,15 +101,15 @@ pub fn select_item(state: &mut State, option: ItemOption) {
 
 pub fn add_line(state: &mut State) {
     let Some(selected) = state.bills.item_selected.clone() else {
-        state.status = Some("choose an item first".into());
+        state.notice = Some(Notice::error("choose an item first"));
         return;
     };
     let Some(qty) = state.bills.qty_input.trim().parse::<f64>().ok().filter(|q| *q > 0.0) else {
-        state.status = Some("quantity must be a positive number".into());
+        state.notice = Some(Notice::error("quantity must be a positive number"));
         return;
     };
     let Some(price_paise) = money::rupees_to_paise(&state.bills.price_input) else {
-        state.status = Some("price must be a valid amount, e.g. 120.00".into());
+        state.notice = Some(Notice::error("price must be a valid amount, e.g. 120.00"));
         return;
     };
 
@@ -121,7 +124,8 @@ pub fn add_line(state: &mut State) {
     state.bills.item_selected = None;
     state.bills.qty_input.clear();
     state.bills.price_input.clear();
-    state.status = None;
+    state.bills.customer_input.clear();
+    state.notice = None;
 }
 
 pub fn remove_line(state: &mut State, index: usize) {
@@ -137,12 +141,13 @@ pub fn start_new(state: &mut State) {
     state.bills.item_selected = None;
     state.bills.qty_input.clear();
     state.bills.price_input.clear();
-    state.status = None;
+    state.notice = None;
 }
 
 pub fn load_for_edit(state: &mut State, detail: BillDetail) {
     state.bills.editing_id = Some(detail.id);
     state.bills.discount_input = money::paise_to_input(detail.discount_paise);
+    state.bills.customer_input = detail.customer_name.clone();
     state.bills.cart = detail
         .lines
         .iter()
@@ -153,7 +158,7 @@ pub fn load_for_edit(state: &mut State, detail: BillDetail) {
 
 pub fn submit(state: &mut State) -> Task<Message> {
     if state.bills.cart.is_empty() {
-        state.status = Some("add at least one item to the bill".into());
+        state.notice = Some(Notice::error("add at least one item to the bill"));
         return Task::none();
     }
     let discount_paise = if state.bills.discount_input.trim().is_empty() {
@@ -162,14 +167,14 @@ pub fn submit(state: &mut State) -> Task<Message> {
         match money::rupees_to_paise(&state.bills.discount_input) {
             Some(v) => v,
             None => {
-                state.status = Some("discount must be a valid amount, e.g. 20.00".into());
+                state.notice = Some(Notice::error("discount must be a valid amount, e.g. 20.00"));
                 return Task::none();
             }
         }
     };
     let subtotal = subtotal_paise(&state.bills.cart);
     if discount_paise > subtotal {
-        state.status = Some("discount can't be more than the subtotal".into());
+        state.notice = Some(Notice::error("discount can't be more than the subtotal"));
         return Task::none();
     }
 
@@ -183,12 +188,13 @@ pub fn submit(state: &mut State) -> Task<Message> {
         .map(|l| BillLineInput { item_id: l.item_id, item_name: l.item_name.clone(), qty: l.qty, price_paise: l.price_paise, gst_rate_bp: l.gst_rate_bp })
         .collect();
     let editing_id = state.bills.editing_id;
+    let customer = state.bills.customer_input.trim().to_string();
 
     Task::perform(
         async move {
             match editing_id {
-                Some(id) => crate::repo::edit_bill(&pool, id, &lines, discount_paise).await.map(|_| id),
-                None => crate::repo::create_bill(&pool, &lines, discount_paise).await,
+                Some(id) => crate::repo::edit_bill(&pool, id, &lines, discount_paise, &customer).await.map(|_| id),
+                None => crate::repo::create_bill(&pool, &lines, discount_paise, &customer).await,
             }
         },
         |result| Message::BillSaved(result.map_err(|e| e.to_string())),
@@ -210,13 +216,12 @@ pub fn print_bill(state: &State, id: i64) -> Task<Message> {
     let Some(pool) = state.pool.clone() else {
         return Task::done(Message::BillPdfReady(Err("database is not ready yet".into())));
     };
-    let shop_name = state.shop.as_ref().map(|s| s.shop_name.clone()).unwrap_or_else(|| "Srotas Desk".to_string());
-    let gstin = state.shop.as_ref().and_then(|s| s.gstin.clone());
+    let shop = common::ShopIdentity::from_state(state);
 
     Task::perform(
         async move {
             let detail = crate::repo::get_bill(&pool, id).await.map_err(|e| e.to_string())?;
-            let bytes = build_pdf_bytes(&shop_name, gstin.as_deref(), &detail)?;
+            let bytes = build_pdf_bytes(&shop, &detail)?;
             save_and_open(bytes, detail.id).await
         },
         Message::BillPdfReady,
@@ -235,64 +240,65 @@ async fn save_and_open(bytes: Vec<u8>, id: i64) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-const TABLE_ITEM_X: f32 = crate::pdf::LEFT_MM;
-const TABLE_QTY_X: f32 = 85.0;
-const TABLE_PRICE_X: f32 = 105.0;
-const TABLE_GST_X: f32 = 135.0;
-const TABLE_TOTAL_X: f32 = 160.0;
+/// The line-item table. Weights, not millimetres — the item name simply
+/// gets the room the five numeric columns don't need.
+const BILL_COLUMNS: [pdf::Column; 6] = [
+    pdf::Column::left("Item", 3.4),
+    pdf::Column::right("Qty", 0.8),
+    pdf::Column::right("Rate", 1.2),
+    pdf::Column::right("GST", 0.9),
+    pdf::Column::right("Tax", 1.1),
+    pdf::Column::right("Amount", 1.4),
+];
 
-fn build_pdf_bytes(shop_name: &str, gstin: Option<&str>, detail: &BillDetail) -> Result<Vec<u8>, String> {
-    let mut w = crate::pdf::Writer::new(&format!("{shop_name} - Bill #{}", detail.id))?;
+fn build_pdf_bytes(shop: &common::ShopIdentity, detail: &BillDetail) -> Result<Vec<u8>, String> {
+    let mut doc = pdf::Doc::new(&format!("{} - Bill #{}", shop.name, detail.id))?;
 
-    w.line(shop_name, 18.0, true);
-    if let Some(gstin) = gstin.filter(|g| !g.trim().is_empty()) {
-        w.line(&format!("GSTIN: {gstin}"), 10.0, false);
+    doc.masthead(&shop.masthead(
+        "TAX INVOICE",
+        Some(format!("Bill #{}", detail.id)),
+        Some(detail.timestamp.format("%d %b %Y, %H:%M").to_string()),
+    ));
+
+    let item_count: f64 = detail.lines.iter().map(|l| l.qty).sum();
+    doc.facts(&[
+        ("Billed to", if detail.customer_name.is_empty() { "Walk-in customer".to_string() } else { detail.customer_name.clone() }),
+        ("Date", detail.timestamp.format("%d %b %Y").to_string()),
+        ("Line items", detail.lines.len().to_string()),
+        ("Total quantity", format!("{item_count:.2}")),
+    ]);
+
+    doc.section("Items");
+    let rows: Vec<Vec<String>> = detail
+        .lines
+        .iter()
+        .map(|l| {
+            vec![
+                l.item_name.clone(),
+                format!("{:.2}", l.qty),
+                money::format_paise_ascii(l.price_paise),
+                money::format_gst_rate_bp(l.gst_rate_bp),
+                money::format_paise_ascii(l.cgst_paise + l.sgst_paise),
+                money::format_paise_ascii(l.line_total_paise),
+            ]
+        })
+        .collect();
+    doc.table(&BILL_COLUMNS, &rows, "This bill has no line items.");
+
+    // A discount of zero is noise on a receipt — only show the rows that
+    // actually happened.
+    let mut totals = vec![("Subtotal".to_string(), money::format_paise_ascii(detail.subtotal_paise))];
+    if detail.discount_paise != 0 {
+        totals.push(("Discount".to_string(), format!("-{}", money::format_paise_ascii(detail.discount_paise))));
     }
-    w.line(&format!("Bill #{}", detail.id), 14.0, true);
-    w.line(&format!("Date: {}", detail.timestamp.format("%d %b %Y %H:%M")), 10.0, false);
-    w.gap(6.0);
-
-    w.row(
-        &[("Item", TABLE_ITEM_X), ("Qty", TABLE_QTY_X), ("Price", TABLE_PRICE_X), ("GST", TABLE_GST_X), ("Total", TABLE_TOTAL_X)],
-        10.0,
-        true,
-    );
-    for l in &detail.lines {
-        let name = truncate(&l.item_name, 32);
-        let qty = format!("{:.1}", l.qty);
-        let price = money::format_paise_ascii(l.price_paise);
-        let gst = money::format_gst_rate_bp(l.gst_rate_bp);
-        let total = money::format_paise_ascii(l.line_total_paise);
-        w.row(
-            &[
-                (name.as_str(), TABLE_ITEM_X),
-                (qty.as_str(), TABLE_QTY_X),
-                (price.as_str(), TABLE_PRICE_X),
-                (gst.as_str(), TABLE_GST_X),
-                (total.as_str(), TABLE_TOTAL_X),
-            ],
-            9.0,
-            false,
-        );
+    if detail.cgst_paise != 0 || detail.sgst_paise != 0 {
+        totals.push(("CGST".to_string(), money::format_paise_ascii(detail.cgst_paise)));
+        totals.push(("SGST".to_string(), money::format_paise_ascii(detail.sgst_paise)));
     }
-    w.gap(6.0);
+    doc.totals(&totals, ("TOTAL", money::format_paise_ascii(detail.total_paise)));
 
-    w.line(&format!("Subtotal: {}", money::format_paise_ascii(detail.subtotal_paise)), 11.0, false);
-    w.line(&format!("Discount: {}", money::format_paise_ascii(detail.discount_paise)), 11.0, false);
-    w.line(&format!("CGST: {}", money::format_paise_ascii(detail.cgst_paise)), 11.0, false);
-    w.line(&format!("SGST: {}", money::format_paise_ascii(detail.sgst_paise)), 11.0, false);
-    w.line(&format!("Total: {}", money::format_paise_ascii(detail.total_paise)), 14.0, true);
-
-    w.finish()
-}
-
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
-    }
-    let mut truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-    truncated.push('…');
-    truncated
+    doc.note("Thank you for your business. Goods once sold are covered by the shop's usual terms.");
+    doc.finish(&shop.name)
 }
 
 pub fn view(state: &State) -> Element<'_, Message> {
@@ -310,10 +316,19 @@ pub fn view(state: &State) -> Element<'_, Message> {
         .padding(10)
         .width(Length::Fixed(240.0));
 
+    let customer_row = row![
+        labeled(
+            "Customer name (optional)",
+            common::field("e.g. Ramesh Verma — leave blank for a walk-in", &bills.customer_input)
+                .on_input(Message::BillCustomerChanged)
+                .width(Length::Fixed(360.0)),
+        ),
+    ];
+
     let add_row = row![
         labeled("Item", item_picker),
-        labeled("Quantity", text_input("e.g. 2", &bills.qty_input).on_input(Message::BillQtyChanged).padding(10).width(Length::Fixed(100.0))),
-        labeled("Price (₹)", text_input("120.00", &bills.price_input).on_input(Message::BillPriceChanged).padding(10).width(Length::Fixed(120.0))),
+        labeled("Quantity", common::field("e.g. 2", &bills.qty_input).on_input(Message::BillQtyChanged).width(Length::Fixed(100.0))),
+        labeled("Price (₹)", common::field("120.00", &bills.price_input).on_input(Message::BillPriceChanged).width(Length::Fixed(120.0))),
         button(text("Add Line").size(14)).style(theme::secondary_button).padding([10, 16]).on_press(Message::AddBillLine),
     ]
     .spacing(theme::SPACE_MD)
@@ -345,7 +360,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
         row![text("Subtotal").width(Length::Fixed(140.0)), text(money::format_paise(computed.subtotal_paise))],
         row![
             text("Discount (₹)").width(Length::Fixed(140.0)),
-            text_input("0.00", &bills.discount_input).on_input(Message::BillDiscountChanged).padding(8).width(Length::Fixed(140.0)),
+            common::field("0.00", &bills.discount_input).on_input(Message::BillDiscountChanged).padding(8).width(Length::Fixed(140.0)),
         ]
         .align_y(iced::Alignment::Center),
         row![text("CGST").width(Length::Fixed(140.0)), text(money::format_paise(computed.cgst_paise))],
@@ -367,6 +382,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
 
     let form = column![
         text(title).size(20),
+        customer_row,
         add_row,
         container(cart_list).style(theme::card).padding(theme::SPACE_MD),
         totals,
@@ -384,7 +400,14 @@ pub fn view(state: &State) -> Element<'_, Message> {
         history = history.push(
             container(
                 row![
-                    text(format!("Bill #{}", b.id)).width(Length::FillPortion(2)),
+                    column![
+                        text(format!("Bill #{}", b.id)),
+                        text(if b.customer_name.is_empty() { "Walk-in" } else { &b.customer_name })
+                            .size(theme::TEXT_CAPTION)
+                            .color(theme::MUTED_TEXT),
+                    ]
+                    .spacing(2)
+                    .width(Length::FillPortion(2)),
                     text(format!("{} item(s)", b.item_count)).width(Length::FillPortion(2)),
                     text(money::format_paise(b.total_paise)).width(Length::FillPortion(2)),
                     text(b.timestamp.format("%d-%b-%y %H:%M").to_string()).width(Length::FillPortion(2)),
@@ -458,6 +481,11 @@ fn detail_view<'a>(state: &'a State, detail: &'a BillDetail) -> Element<'a, Mess
     let body = column![
         text(format!("Bill #{}", detail.id)).size(22),
         text(detail.timestamp.format("%d %b %Y %H:%M").to_string()).size(13).color(theme::MUTED_TEXT),
+        row![
+            text("Billed to").width(Length::Fixed(140.0)).size(13).color(theme::MUTED_TEXT),
+            text(if detail.customer_name.is_empty() { "Walk-in customer" } else { &detail.customer_name })
+                .size(theme::TEXT_BODY),
+        ],
         container(lines).style(theme::card).padding(theme::SPACE_MD),
         row![text("Subtotal").width(Length::Fixed(140.0)), text(money::format_paise(detail.subtotal_paise))],
         row![text("Discount").width(Length::Fixed(140.0)), text(money::format_paise(detail.discount_paise))],

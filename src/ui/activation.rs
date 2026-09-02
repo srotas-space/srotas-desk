@@ -27,7 +27,11 @@ pub enum Outcome {
     /// `expiry_warning` is `Some` when the license is still valid but
     /// expires soon — see `expiry_warning` below. The app proceeds either
     /// way; this is a heads-up, not a block.
-    Valid { expiry_warning: Option<String> },
+    ///
+    /// `device_id` rides along even on the happy path because the
+    /// forgotten-PIN reset needs it to check a license key, long after the
+    /// activation screen has been left behind.
+    Valid { device_id: String, expiry_warning: Option<String> },
     NeedsActivation { device_id: String, message: Option<String> },
 }
 
@@ -57,7 +61,9 @@ pub async fn check(pool: sqlx::SqlitePool) -> Result<Outcome, String> {
     let row = crate::repo::get_or_create(&pool).await.map_err(|e| e.to_string())?;
     match row.key_text {
         Some(key_text) => match crate::license::verify(&key_text, &row.device_id, chrono::Utc::now()) {
-            Ok(payload) => Ok(Outcome::Valid { expiry_warning: expiry_warning(&payload) }),
+            Ok(payload) => {
+                Ok(Outcome::Valid { device_id: row.device_id.clone(), expiry_warning: expiry_warning(&payload) })
+            }
             Err(e) => Ok(Outcome::NeedsActivation { device_id: row.device_id, message: Some(e.to_string()) }),
         },
         None => Ok(Outcome::NeedsActivation { device_id: row.device_id, message: None }),
@@ -87,49 +93,83 @@ pub fn submit(state: &mut State) -> Task<Message> {
 
 pub fn view(state: &State) -> Element<'_, Message> {
     let activation = &state.activation;
-    let logo = svg(super::logo_handle()).width(72).height(72);
 
     let device_id_row = row![
-        text_input("", &activation.device_id).padding(10).size(15),
-        button(text("Copy").size(14)).style(theme::secondary_button).padding([10, 16]).on_press(Message::CopyDeviceId),
+        text_input("", &activation.device_id)
+            .style(theme::field_readonly)
+            .padding(theme::FIELD_PADDING)
+            .size(theme::TEXT_BODY),
+        button(text("Copy").size(theme::TEXT_SMALL))
+            .style(theme::secondary_button)
+            .padding(theme::CONTROL_PADDING)
+            .on_press(Message::CopyDeviceId),
     ]
-    .spacing(theme::SPACE_SM);
+    .spacing(theme::SPACE_SM)
+    .align_y(iced::Alignment::Center);
 
     let tnc_row = row![
         checkbox::Checkbox::new(activation.agreed_to_tnc).label("I agree to the").on_toggle(Message::ActivationTncToggled),
-        button(text("Terms & Conditions").size(14)).style(theme::link_button).padding(0).on_press(Message::OpenTnc),
+        button(text("Terms & Conditions").size(theme::TEXT_SMALL))
+            .style(theme::link_button)
+            .padding(0)
+            .on_press(Message::OpenTnc),
     ]
     .spacing(theme::SPACE_SM)
     .align_y(iced::Alignment::Center);
 
     let mut fields = column![
-        text("Activate Srotas Desk").size(26),
-        text("This computer's Device ID — send it to us to receive your license key.").size(14).color(theme::MUTED_TEXT),
-        device_id_row,
+        column![
+            text("Activate Srotas Desk").size(theme::TEXT_DISPLAY).font(theme::SEMIBOLD),
+            text("One key, one computer — no internet needed after this.")
+                .size(theme::TEXT_SMALL)
+                .color(theme::MUTED_TEXT),
+        ]
+        .spacing(theme::SPACE_XS)
+        .align_x(iced::Alignment::Center)
+        .width(Length::Fill),
+        labeled_with_hint(
+            "This computer's Device ID",
+            "Send it to us and we'll issue a key bound to this machine.",
+            device_id_row,
+        ),
         labeled(
             "License key",
             text_input("Paste your license key here", &activation.key_input)
                 .on_input(Message::ActivationKeyChanged)
-                .padding(10)
-                .size(15),
+                .on_submit(Message::SubmitActivation)
+                .style(theme::field)
+                .padding(theme::FIELD_PADDING)
+                .size(theme::TEXT_BODY),
         ),
-        tnc_row,
-        button(text("Activate").size(16))
-            .style(theme::primary_button)
-            .padding([12, 24])
-            .on_press_maybe(activation.agreed_to_tnc.then_some(Message::SubmitActivation)),
     ]
     .spacing(theme::SPACE_MD)
     .max_width(480);
 
     if let Some(error) = &activation.error {
-        fields = fields.push(text(error).size(13).color(iced::Color::from_rgb(0.83, 0.16, 0.16)));
+        fields = fields.push(
+            container(text(error).size(theme::TEXT_SMALL))
+                .style(theme::notice_error)
+                .padding([theme::SPACE_SM as u16, theme::SPACE_MD as u16])
+                .width(Length::Fill),
+        );
     }
 
-    let card = container(column![logo, fields].spacing(theme::SPACE_MD).align_x(iced::Alignment::Center))
-        .style(theme::card)
-        .padding(theme::SPACE_LG)
-        .max_width(560);
+    fields = fields.push(tnc_row);
+    fields = fields.push(
+        button(text("Activate").size(theme::TEXT_BODY).font(theme::SEMIBOLD))
+            .style(theme::primary_button)
+            .padding([13, 28])
+            .on_press_maybe(activation.agreed_to_tnc.then_some(Message::SubmitActivation)),
+    );
+
+    let card = container(
+        column![svg(super::logo_handle()).width(64).height(64), fields]
+            .spacing(theme::SPACE_MD)
+            .align_x(iced::Alignment::Center),
+    )
+    .style(theme::card)
+    .padding(theme::SPACE_LG)
+    .max_width(560);
 
     container(card)
         .width(Length::Fill)
@@ -175,5 +215,23 @@ mod tests {
 }
 
 fn labeled<'a>(label: &'a str, widget: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    column![text(label).size(13), widget.into()].spacing(4).into()
+    column![text(label).size(theme::TEXT_SMALL).color(theme::MUTED_TEXT), widget.into()]
+        .spacing(theme::SPACE_XS)
+        .width(Length::Fill)
+        .into()
+}
+
+fn labeled_with_hint<'a>(
+    label: &'a str,
+    hint: &'a str,
+    widget: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    column![
+        text(label).size(theme::TEXT_SMALL).color(theme::MUTED_TEXT),
+        widget.into(),
+        text(hint).size(theme::TEXT_CAPTION).color(theme::MUTED_TEXT),
+    ]
+    .spacing(theme::SPACE_XS)
+    .width(Length::Fill)
+    .into()
 }

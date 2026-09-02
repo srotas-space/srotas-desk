@@ -14,55 +14,35 @@ pub async fn current_stock_value_paise(pool: &SqlitePool) -> Result<i64, RepoErr
     Ok(value.round() as i64)
 }
 
-/// One sale, with its profit computed against the item's *current* buy
-/// price. This is the simple MVP formula the spec calls for — it doesn't
-/// track cost per purchase batch (FIFO/weighted-average), so if buy price
-/// changes after a sale, that sale's reported profit changes too.
-#[derive(Debug, Clone)]
-pub struct SaleReportRow {
-    pub transaction_id: i64,
-    pub item_id: i64,
-    pub item_name: String,
-    pub qty: f64,
-    pub sell_price_paise: i64,
-    pub buy_price_paise: i64,
-    pub profit_paise: i64,
-    pub timestamp: DateTime<Utc>,
-}
-
+/// One sale's contribution to profit, computed against the item's
+/// *current* buy price. This is the simple MVP formula the spec calls for
+/// — it doesn't track cost per purchase batch (FIFO/weighted-average), so
+/// if a buy price changes after a sale, that sale's reported profit
+/// changes too.
 #[derive(sqlx::FromRow)]
-struct RawSaleRow {
-    transaction_id: i64,
-    item_id: i64,
-    item_name: String,
+struct SaleProfitRow {
     qty: f64,
     sell_price_paise: i64,
     buy_price_paise: i64,
-    timestamp: DateTime<Utc>,
 }
 
-pub async fn sales_report(
+pub async fn total_profit_paise(
     pool: &SqlitePool,
     item_id: Option<i64>,
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
-) -> Result<Vec<SaleReportRow>, RepoError> {
-    let rows = sqlx::query_as::<_, RawSaleRow>(
+) -> Result<i64, RepoError> {
+    let rows = sqlx::query_as::<_, SaleProfitRow>(
         "SELECT \
-             t.id AS transaction_id, \
-             t.item_id AS item_id, \
-             i.name AS item_name, \
              t.qty AS qty, \
              t.price_paise AS sell_price_paise, \
-             i.buy_price_paise AS buy_price_paise, \
-             t.timestamp AS timestamp \
+             i.buy_price_paise AS buy_price_paise \
          FROM transactions t \
          JOIN items i ON i.id = t.item_id \
          WHERE t.type = 'sell' AND t.deleted = 0 \
            AND (? IS NULL OR t.item_id = ?) \
            AND (? IS NULL OR t.timestamp >= ?) \
-           AND (? IS NULL OR t.timestamp <= ?) \
-         ORDER BY t.timestamp DESC",
+           AND (? IS NULL OR t.timestamp <= ?)",
     )
     .bind(item_id)
     .bind(item_id)
@@ -73,40 +53,17 @@ pub async fn sales_report(
     .fetch_all(pool)
     .await?;
 
+    // Rounded per sale rather than once at the end, so the total matches
+    // what you get by adding up the individual sales by hand.
     Ok(rows
-        .into_iter()
-        .map(|r| {
-            let profit_paise =
-                ((r.sell_price_paise - r.buy_price_paise) as f64 * r.qty).round() as i64;
-            SaleReportRow {
-                transaction_id: r.transaction_id,
-                item_id: r.item_id,
-                item_name: r.item_name,
-                qty: r.qty,
-                sell_price_paise: r.sell_price_paise,
-                buy_price_paise: r.buy_price_paise,
-                profit_paise,
-                timestamp: r.timestamp,
-            }
-        })
-        .collect())
-}
-
-pub async fn total_profit_paise(
-    pool: &SqlitePool,
-    item_id: Option<i64>,
-    from: Option<DateTime<Utc>>,
-    to: Option<DateTime<Utc>>,
-) -> Result<i64, RepoError> {
-    let rows = sales_report(pool, item_id, from, to).await?;
-    Ok(rows.iter().map(|r| r.profit_paise).sum())
+        .iter()
+        .map(|r| ((r.sell_price_paise - r.buy_price_paise) as f64 * r.qty).round() as i64)
+        .sum())
 }
 
 /// A buy-or-sell row for the general transaction history view.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TransactionHistoryRow {
-    pub id: i64,
-    pub item_id: i64,
     pub item_name: String,
     pub kind: String,
     pub qty: f64,
@@ -124,8 +81,6 @@ pub async fn transaction_history(
 ) -> Result<Vec<TransactionHistoryRow>, RepoError> {
     let rows = sqlx::query_as::<_, TransactionHistoryRow>(
         "SELECT \
-             t.id AS id, \
-             t.item_id AS item_id, \
              i.name AS item_name, \
              t.type AS kind, \
              t.qty AS qty, \
@@ -154,4 +109,82 @@ pub async fn transaction_history(
     .await?;
 
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+
+    async fn test_pool() -> SqlitePool {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:").unwrap();
+        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(options).await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    /// `buy_price_paise` is what profit is measured against — see the note
+    /// on `SaleProfitRow`.
+    async fn seed_item(pool: &SqlitePool, name: &str, buy_paise: i64) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO items (name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold) \
+             VALUES (?, ?, ?, 1000, 'piece', 5) RETURNING id",
+        )
+        .bind(name)
+        .bind(buy_paise)
+        .bind(buy_paise * 2)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn profit_is_sale_price_less_buy_price_across_every_sale() {
+        let pool = test_pool().await;
+        let item = seed_item(&pool, "Item A", 8000).await;
+
+        crate::repo::record_sale(&pool, item, 2.0, 12000, Utc::now()).await.unwrap();
+        crate::repo::record_sale(&pool, item, 3.0, 11000, Utc::now()).await.unwrap();
+
+        // (12000-8000)*2 + (11000-8000)*3 = 8000 + 9000
+        assert_eq!(total_profit_paise(&pool, None, None, None).await.unwrap(), 17_000);
+    }
+
+    #[tokio::test]
+    async fn purchases_and_deleted_sales_are_left_out() {
+        let pool = test_pool().await;
+        let item = seed_item(&pool, "Item A", 8000).await;
+
+        crate::repo::record_purchase(&pool, item, 5.0, 8000, Utc::now()).await.unwrap();
+        crate::repo::record_sale(&pool, item, 1.0, 12000, Utc::now()).await.unwrap();
+        crate::repo::record_sale(&pool, item, 1.0, 12000, Utc::now()).await.unwrap();
+        sqlx::query("UPDATE transactions SET deleted = 1 WHERE type = 'sell' AND id = (SELECT MAX(id) FROM transactions)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Only the one surviving sale counts, and the purchase never does.
+        assert_eq!(total_profit_paise(&pool, None, None, None).await.unwrap(), 4_000);
+    }
+
+    #[tokio::test]
+    async fn the_item_filter_narrows_the_total() {
+        let pool = test_pool().await;
+        let a = seed_item(&pool, "Item A", 8000).await;
+        let b = seed_item(&pool, "Item B", 5000).await;
+
+        crate::repo::record_sale(&pool, a, 1.0, 12000, Utc::now()).await.unwrap();
+        crate::repo::record_sale(&pool, b, 1.0, 9000, Utc::now()).await.unwrap();
+
+        assert_eq!(total_profit_paise(&pool, Some(a), None, None).await.unwrap(), 4_000);
+        assert_eq!(total_profit_paise(&pool, Some(b), None, None).await.unwrap(), 4_000);
+        assert_eq!(total_profit_paise(&pool, None, None, None).await.unwrap(), 8_000);
+    }
+
+    #[tokio::test]
+    async fn a_period_with_no_sales_is_zero_not_an_error() {
+        let pool = test_pool().await;
+        assert_eq!(total_profit_paise(&pool, None, None, None).await.unwrap(), 0);
+    }
 }

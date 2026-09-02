@@ -51,8 +51,10 @@ pub struct Item {
     pub stock_qty: f64,
     pub unit: String,
     pub low_stock_threshold: f64,
-    pub deleted: bool,
     pub description: String,
+    /// Where this sits in the shop — "Rack 4, Shelf B", "Godown", whatever
+    /// the shop calls it. Empty when nobody has recorded one.
+    pub location: String,
     pub has_image: bool,
     /// Basis points (1800 = 18.00%). `None` means "use the shop's default
     /// GST rate" rather than "0% GST" — see `ShopProfile::gst_rate_bp`.
@@ -65,19 +67,6 @@ impl Item {
     }
 }
 
-/// One row from the `transactions` table. Field is named `kind` rather than
-/// `type` because `type` is a Rust keyword — the SQL still uses `type` and
-/// aliases it to `kind` on the way out.
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct Transaction {
-    pub id: i64,
-    pub item_id: i64,
-    pub kind: String,
-    pub qty: f64,
-    pub price_paise: i64,
-    pub timestamp: DateTime<Utc>,
-}
-
 /// The single row from `shop_profile` — this shop's identity, captured at
 /// first-run registration.
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -86,13 +75,31 @@ pub struct ShopProfile {
     pub owner_name: String,
     pub phone: String,
     pub address: String,
-    pub pin: Option<String>,
-    pub created_at: DateTime<Utc>,
+    /// Argon2id PHC string for the screen-lock PIN, or `None` when no PIN
+    /// is set. Never the PIN itself — see `crate::pin`.
+    pub pin_hash: Option<String>,
     pub has_logo: bool,
     /// Default GST rate in basis points (1800 = 18.00%), used for any item
     /// that doesn't set its own override.
     pub gst_rate_bp: i64,
     pub gstin: Option<String>,
+    /// Consecutive wrong PINs since the last successful unlock. Persisted
+    /// (not just held in memory) so relaunching the app can't clear a
+    /// lockout — see `crate::pin::lockout_for`.
+    pub pin_failed_attempts: i64,
+    pub pin_locked_until: Option<DateTime<Utc>>,
+}
+
+impl ShopProfile {
+    pub fn has_pin(&self) -> bool {
+        self.pin_hash.is_some()
+    }
+
+    /// Seconds left on the failed-attempt lockout, or `None` if the screen
+    /// isn't locked right now.
+    pub fn lock_remaining_secs(&self, now: DateTime<Utc>) -> Option<i64> {
+        crate::pin::remaining_lock_secs(self.pin_locked_until, now)
+    }
 }
 
 /// One row of the bills list — enough to render a history row without
@@ -100,6 +107,8 @@ pub struct ShopProfile {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct BillSummary {
     pub id: i64,
+    /// Empty for a walk-in sale that nobody asked to be named.
+    pub customer_name: String,
     pub item_count: i64,
     pub total_paise: i64,
     pub timestamp: DateTime<Utc>,
@@ -110,7 +119,6 @@ pub struct BillSummary {
 /// later renamed or deleted.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct BillLine {
-    pub id: i64,
     pub item_id: i64,
     pub item_name: String,
     pub qty: f64,
@@ -127,6 +135,7 @@ pub struct BillLine {
 #[derive(Debug, Clone)]
 pub struct BillDetail {
     pub id: i64,
+    pub customer_name: String,
     pub subtotal_paise: i64,
     pub discount_paise: i64,
     pub cgst_paise: i64,

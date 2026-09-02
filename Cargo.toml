@@ -4,7 +4,12 @@ version = "0.1.3"
 edition = "2024"
 
 [dependencies]
+argon2 = "0.5"
 base64 = "0.22"
+# Only here to turn on `getrandom`, which is what puts `OsRng` (and so
+# `SaltString::generate`) in scope — argon2 pulls password-hash in but has
+# no feature of its own that reaches that far.
+password-hash = { version = "0.5", features = ["getrandom"] }
 chrono = "0.4.45"
 dirs = "6.0.0"
 ed25519-dalek = "2"

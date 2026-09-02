@@ -130,7 +130,15 @@ async fn insert_bill_items(
     Ok(())
 }
 
-pub async fn create_bill(pool: &SqlitePool, lines: &[BillLineInput], discount_paise: i64) -> Result<i64, RepoError> {
+/// `customer_name` is free text and may be empty — most counter sales are
+/// to whoever is standing there, and only some customers want a name on
+/// the invoice.
+pub async fn create_bill(
+    pool: &SqlitePool,
+    lines: &[BillLineInput],
+    discount_paise: i64,
+    customer_name: &str,
+) -> Result<i64, RepoError> {
     if lines.is_empty() {
         return Err(RepoError::InvalidQty);
     }
@@ -148,8 +156,8 @@ pub async fn create_bill(pool: &SqlitePool, lines: &[BillLineInput], discount_pa
     }
 
     let bill_id: i64 = sqlx::query_scalar(
-        "INSERT INTO bills (subtotal_paise, discount_paise, cgst_paise, sgst_paise, total_paise, timestamp) \
-         VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+        "INSERT INTO bills (subtotal_paise, discount_paise, cgst_paise, sgst_paise, total_paise, timestamp, customer_name) \
+         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(subtotal_paise)
     .bind(discount_paise)
@@ -157,6 +165,7 @@ pub async fn create_bill(pool: &SqlitePool, lines: &[BillLineInput], discount_pa
     .bind(sgst_paise)
     .bind(total_paise)
     .bind(Utc::now())
+    .bind(customer_name)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -170,7 +179,13 @@ pub async fn create_bill(pool: &SqlitePool, lines: &[BillLineInput], discount_pa
 /// per-item quantity delta (old vs. new) rather than fully reversing and
 /// redoing — so an edit that only tweaks the discount touches no stock at
 /// all, and one that changes a quantity only moves the difference.
-pub async fn edit_bill(pool: &SqlitePool, id: i64, lines: &[BillLineInput], discount_paise: i64) -> Result<(), RepoError> {
+pub async fn edit_bill(
+    pool: &SqlitePool,
+    id: i64,
+    lines: &[BillLineInput],
+    discount_paise: i64,
+    customer_name: &str,
+) -> Result<(), RepoError> {
     if lines.is_empty() {
         return Err(RepoError::InvalidQty);
     }
@@ -217,7 +232,8 @@ pub async fn edit_bill(pool: &SqlitePool, id: i64, lines: &[BillLineInput], disc
     let total_paise = (subtotal_paise - discount_paise).max(0) + cgst_paise + sgst_paise;
 
     let affected = sqlx::query(
-        "UPDATE bills SET subtotal_paise = ?, discount_paise = ?, cgst_paise = ?, sgst_paise = ?, total_paise = ? \
+        "UPDATE bills SET subtotal_paise = ?, discount_paise = ?, cgst_paise = ?, sgst_paise = ?, total_paise = ?, \
+             customer_name = ? \
          WHERE id = ? AND deleted = 0",
     )
     .bind(subtotal_paise)
@@ -225,6 +241,7 @@ pub async fn edit_bill(pool: &SqlitePool, id: i64, lines: &[BillLineInput], disc
     .bind(cgst_paise)
     .bind(sgst_paise)
     .bind(total_paise)
+    .bind(customer_name)
     .bind(id)
     .execute(&mut *tx)
     .await?
@@ -255,7 +272,7 @@ pub async fn list_bills(pool: &SqlitePool, page: i64, page_size: i64) -> Result<
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bills WHERE deleted = 0").fetch_one(pool).await?;
 
     let bills = sqlx::query_as::<_, BillSummary>(
-        "SELECT b.id, b.total_paise, b.timestamp, \
+        "SELECT b.id, b.customer_name, b.total_paise, b.timestamp, \
                 (SELECT COUNT(*) FROM bill_items bi WHERE bi.bill_id = b.id) AS item_count \
          FROM bills b \
          WHERE b.deleted = 0 \
@@ -271,25 +288,27 @@ pub async fn list_bills(pool: &SqlitePool, page: i64, page_size: i64) -> Result<
 }
 
 pub async fn get_bill(pool: &SqlitePool, id: i64) -> Result<BillDetail, RepoError> {
-    let header: Option<(i64, i64, i64, i64, i64, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT subtotal_paise, discount_paise, cgst_paise, sgst_paise, total_paise, timestamp FROM bills WHERE id = ? AND deleted = 0",
+    let header: Option<(i64, i64, i64, i64, i64, DateTime<Utc>, String)> = sqlx::query_as(
+        "SELECT subtotal_paise, discount_paise, cgst_paise, sgst_paise, total_paise, timestamp, customer_name \
+         FROM bills WHERE id = ? AND deleted = 0",
     )
     .bind(id)
     .fetch_optional(pool)
     .await?;
-    let Some((subtotal_paise, discount_paise, cgst_paise, sgst_paise, total_paise, timestamp)) = header else {
+    let Some((subtotal_paise, discount_paise, cgst_paise, sgst_paise, total_paise, timestamp, customer_name)) = header
+    else {
         return Err(RepoError::ItemNotFound);
     };
 
     let lines = sqlx::query_as::<_, BillLine>(
-        "SELECT id, item_id, item_name, qty, price_paise, line_total_paise, gst_rate_bp, cgst_paise, sgst_paise \
+        "SELECT item_id, item_name, qty, price_paise, line_total_paise, gst_rate_bp, cgst_paise, sgst_paise \
          FROM bill_items WHERE bill_id = ? ORDER BY id",
     )
     .bind(id)
     .fetch_all(pool)
     .await?;
 
-    Ok(BillDetail { id, subtotal_paise, discount_paise, cgst_paise, sgst_paise, total_paise, timestamp, lines })
+    Ok(BillDetail { id, customer_name, subtotal_paise, discount_paise, cgst_paise, sgst_paise, total_paise, timestamp, lines })
 }
 
 #[cfg(test)]
@@ -326,6 +345,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_customer_name_survives_the_round_trip_and_may_be_blank() {
+        let pool = test_pool().await;
+        let item = seed_item(&pool, "Item A", 10.0, 10000).await;
+        let lines = vec![BillLineInput {
+            item_id: item,
+            item_name: "Item A".into(),
+            qty: 1.0,
+            price_paise: 10000,
+            gst_rate_bp: 0,
+        }];
+
+        let named = create_bill(&pool, &lines, 0, "Ramesh Verma").await.unwrap();
+        let walk_in = create_bill(&pool, &lines, 0, "").await.unwrap();
+
+        assert_eq!(get_bill(&pool, named).await.unwrap().customer_name, "Ramesh Verma");
+        assert_eq!(get_bill(&pool, walk_in).await.unwrap().customer_name, "");
+
+        // The history list carries it too, so a bill can be recognised
+        // without opening it.
+        let (rows, _) = list_bills(&pool, 0, 10).await.unwrap();
+        let named_row = rows.iter().find(|b| b.id == named).unwrap();
+        assert_eq!(named_row.customer_name, "Ramesh Verma");
+    }
+
+    #[tokio::test]
+    async fn editing_a_bill_can_change_who_it_was_made_out_to() {
+        let pool = test_pool().await;
+        let item = seed_item(&pool, "Item A", 10.0, 10000).await;
+        let lines = vec![BillLineInput {
+            item_id: item,
+            item_name: "Item A".into(),
+            qty: 1.0,
+            price_paise: 10000,
+            gst_rate_bp: 0,
+        }];
+
+        let bill_id = create_bill(&pool, &lines, 0, "").await.unwrap();
+        edit_bill(&pool, bill_id, &lines, 0, "Sunita Devi").await.unwrap();
+
+        assert_eq!(get_bill(&pool, bill_id).await.unwrap().customer_name, "Sunita Devi");
+    }
+
+    #[tokio::test]
     async fn create_bill_decrements_stock_and_computes_total() {
         let pool = test_pool().await;
         let item_a = seed_item(&pool, "Item A", 10.0, 10000).await;
@@ -335,7 +397,7 @@ mod tests {
             BillLineInput { item_id: item_a, item_name: "Item A".into(), qty: 2.0, price_paise: 10000, gst_rate_bp: 0 },
             BillLineInput { item_id: item_b, item_name: "Item B".into(), qty: 3.0, price_paise: 5000, gst_rate_bp: 0 },
         ];
-        let bill_id = create_bill(&pool, &lines, 1000).await.unwrap();
+        let bill_id = create_bill(&pool, &lines, 1000, "").await.unwrap();
 
         // subtotal = 2*10000 + 3*5000 = 35000; discount 1000 -> total 34000
         let detail = get_bill(&pool, bill_id).await.unwrap();
@@ -360,7 +422,7 @@ mod tests {
         ];
         // subtotal = 20000 + 15000 = 35000; discount 3500 (10%) prorated
         // 2000/1500 across the two lines -> taxable 18000 and 13500.
-        let bill_id = create_bill(&pool, &lines, 3500).await.unwrap();
+        let bill_id = create_bill(&pool, &lines, 3500, "").await.unwrap();
 
         let detail = get_bill(&pool, bill_id).await.unwrap();
         assert_eq!(detail.subtotal_paise, 35000);
@@ -387,7 +449,7 @@ mod tests {
         let item_a = seed_item(&pool, "Item A", 1.0, 10000).await;
 
         let lines = vec![BillLineInput { item_id: item_a, item_name: "Item A".into(), qty: 5.0, price_paise: 10000, gst_rate_bp: 0 }];
-        let result = create_bill(&pool, &lines, 0).await;
+        let result = create_bill(&pool, &lines, 0, "").await;
         assert!(result.is_err());
         // stock must be unchanged since the whole bill rolled back
         assert_eq!(stock_of(&pool, item_a).await, 1.0);
@@ -399,12 +461,12 @@ mod tests {
         let item_a = seed_item(&pool, "Item A", 10.0, 10000).await;
 
         let lines = vec![BillLineInput { item_id: item_a, item_name: "Item A".into(), qty: 2.0, price_paise: 10000, gst_rate_bp: 0 }];
-        let bill_id = create_bill(&pool, &lines, 0).await.unwrap();
+        let bill_id = create_bill(&pool, &lines, 0, "").await.unwrap();
         assert_eq!(stock_of(&pool, item_a).await, 8.0);
 
         // Increase qty from 2 to 5 — should take 3 more units of stock.
         let new_lines = vec![BillLineInput { item_id: item_a, item_name: "Item A".into(), qty: 5.0, price_paise: 10000, gst_rate_bp: 0 }];
-        edit_bill(&pool, bill_id, &new_lines, 0).await.unwrap();
+        edit_bill(&pool, bill_id, &new_lines, 0, "").await.unwrap();
         assert_eq!(stock_of(&pool, item_a).await, 5.0);
 
         let detail = get_bill(&pool, bill_id).await.unwrap();
@@ -414,7 +476,7 @@ mod tests {
 
         // Decrease qty from 5 back to 1 — should return 4 units of stock.
         let smaller_lines = vec![BillLineInput { item_id: item_a, item_name: "Item A".into(), qty: 1.0, price_paise: 10000, gst_rate_bp: 0 }];
-        edit_bill(&pool, bill_id, &smaller_lines, 0).await.unwrap();
+        edit_bill(&pool, bill_id, &smaller_lines, 0, "").await.unwrap();
         assert_eq!(stock_of(&pool, item_a).await, 9.0);
     }
 
@@ -423,7 +485,7 @@ mod tests {
         let pool = test_pool().await;
         let item_a = seed_item(&pool, "Item A", 10.0, 10000).await;
         let lines = vec![BillLineInput { item_id: item_a, item_name: "Item A".into(), qty: 2.0, price_paise: 10000, gst_rate_bp: 0 }];
-        let bill_id = create_bill(&pool, &lines, 0).await.unwrap();
+        let bill_id = create_bill(&pool, &lines, 0, "").await.unwrap();
 
         delete_bill(&pool, bill_id).await.unwrap();
 
@@ -441,7 +503,7 @@ mod tests {
         let item_a = seed_item(&pool, "Item A", 1000.0, 10000).await;
         for _ in 0..15 {
             let lines = vec![BillLineInput { item_id: item_a, item_name: "Item A".into(), qty: 1.0, price_paise: 10000, gst_rate_bp: 0 }];
-            create_bill(&pool, &lines, 0).await.unwrap();
+            create_bill(&pool, &lines, 0, "").await.unwrap();
         }
 
         let (page0, total) = list_bills(&pool, 0, 10).await.unwrap();

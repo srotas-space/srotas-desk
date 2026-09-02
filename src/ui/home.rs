@@ -1,17 +1,54 @@
-use iced::widget::{button, column, container, text};
+use iced::widget::{button, column, container, row, svg, text};
 use iced::{Element, Length};
 
 use super::{Message, State};
 use crate::ui::theme;
 
+/// The two tile icons, embedded at compile time — same reasoning as the
+/// logo in `ui::mod`: the running app never depends on the project's
+/// asset files still being at some relative path on disk.
+///
+/// These replace the emoji the tiles used to show. Emoji come from the
+/// system, not from the app's bundled typeface, so on a machine without
+/// an emoji font (a minimal Ubuntu install, say) both tiles rendered as
+/// empty boxes. An embedded SVG has no such dependency and draws the same
+/// on every platform.
+const STORE_SVG: &[u8] = include_bytes!("../../assets/store.svg");
+const INVENTORY_SVG: &[u8] = include_bytes!("../../assets/inventory.svg");
+
 pub fn view(state: &State) -> Element<'_, Message> {
     let shop_name = state.shop.as_ref().map(|s| s.shop_name.as_str()).unwrap_or("Srotas Desk");
+    let low_stock = state.items.iter().filter(|i| i.is_low_stock()).count();
+
+    let mut heading = column![
+        text(format!("Welcome, {shop_name}")).size(theme::TEXT_DISPLAY).font(theme::SEMIBOLD),
+        text("Pick where you're headed.").size(theme::TEXT_BODY).color(theme::MUTED_TEXT),
+    ]
+    .spacing(theme::SPACE_XS)
+    .align_x(iced::Alignment::Center);
+
+    // A count that's zero is worth no pixels — the badge only earns its
+    // place when there's actually something to restock.
+    if low_stock > 0 {
+        heading = heading.push(
+            container(
+                text(format!(
+                    "{low_stock} item{} running low on stock",
+                    if low_stock == 1 { "" } else { "s" }
+                ))
+                .size(theme::TEXT_SMALL)
+                .font(theme::SEMIBOLD),
+            )
+            .style(theme::low_stock_badge)
+            .padding([theme::SPACE_SM as u16, theme::SPACE_MD as u16]),
+        );
+    }
 
     let tiles = column![
-        text(format!("Welcome, {shop_name}")).size(24),
-        iced::widget::row![
-            tile("🏪", "Shop", "Buy stock, bill sales, view reports & backups", Message::GoToShop),
-            tile("📦", "Inventory", "Manage items, prices & stock levels", Message::GoToInventory),
+        heading,
+        row![
+            tile(STORE_SVG, "Shop", "Buy stock, bill sales, view reports & backups", Message::GoToShop),
+            tile(INVENTORY_SVG, "Inventory", "Manage items, prices & stock levels", Message::GoToInventory),
         ]
         .spacing(theme::SPACE_LG),
     ]
@@ -26,16 +63,16 @@ pub fn view(state: &State) -> Element<'_, Message> {
         .into()
 }
 
-fn tile<'a>(emoji: &'a str, label: &'a str, hint: &'a str, message: Message) -> Element<'a, Message> {
+fn tile<'a>(icon: &'static [u8], label: &'a str, hint: &'a str, message: Message) -> Element<'a, Message> {
     button(
         column![
-            text(emoji).size(48),
-            text(label).size(22),
-            text(hint).size(13),
+            svg(svg::Handle::from_memory(icon)).width(72).height(72),
+            text(label).size(theme::TEXT_TITLE).font(theme::SEMIBOLD),
+            text(hint).size(theme::TEXT_SMALL).align_x(iced::Alignment::Center),
         ]
-        .spacing(6)
+        .spacing(theme::SPACE_SM)
         .align_x(iced::Alignment::Center)
-        .width(Length::Fixed(220.0)),
+        .width(Length::Fixed(230.0)),
     )
     .style(theme::tile_button)
     .padding(theme::SPACE_LG)

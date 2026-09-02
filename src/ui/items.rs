@@ -1,10 +1,10 @@
-use iced::widget::{button, checkbox, column, container, image, pick_list, row, scrollable, text, text_input};
+use iced::widget::{button, checkbox, column, container, image, pick_list, row, scrollable, text};
 use iced::{Element, Length, Task};
 
-use super::{Message, State};
+use super::{Message, Notice, State};
 use crate::models::{Item, Unit};
 use crate::money;
-use crate::ui::theme;
+use crate::ui::{common, theme};
 
 pub const PAGE_SIZE: usize = 10;
 
@@ -46,11 +46,11 @@ pub fn submit_purchase(state: &mut State) -> Task<Message> {
         return Task::none();
     };
     let Some(qty) = form.qty.trim().parse::<f64>().ok().filter(|q| *q > 0.0) else {
-        state.status = Some("quantity must be a positive number".into());
+        state.notice = Some(Notice::error("quantity must be a positive number"));
         return Task::none();
     };
     let Some(price_paise) = money::rupees_to_paise(&form.price) else {
-        state.status = Some("buy price must be a valid amount, e.g. 80.00".into());
+        state.notice = Some(Notice::error("buy price must be a valid amount, e.g. 80.00"));
         return Task::none();
     };
     let item_id = form.item_id;
@@ -72,6 +72,7 @@ pub enum FormField {
     StockQty,
     LowStockThreshold,
     Description,
+    Location,
     GstRate,
 }
 
@@ -125,6 +126,8 @@ pub struct ItemForm {
     pub unit: Unit,
     pub low_stock_threshold: String,
     pub description: String,
+    /// Where the item sits in the shop — free text, and blank is fine.
+    pub location: String,
     /// `None` means "no photo" on a new item, or "photo not loaded yet" on
     /// an item being edited (fetched separately — see `OpenEditItemForm` in
     /// `ui/mod.rs`). Either way, whatever is here when Save is pressed is
@@ -146,6 +149,7 @@ impl ItemForm {
             unit: Unit::Piece,
             low_stock_threshold: String::new(),
             description: String::new(),
+            location: String::new(),
             image: None,
             gst_rate: String::new(),
         }
@@ -161,6 +165,7 @@ impl ItemForm {
             unit: Unit::parse(&item.unit).unwrap_or(Unit::Piece),
             low_stock_threshold: item.low_stock_threshold.to_string(),
             description: item.description.clone(),
+            location: item.location.clone(),
             image: None,
             gst_rate: item.gst_rate_bp.map(money::paise_to_input).unwrap_or_default(),
         }
@@ -174,6 +179,7 @@ impl ItemForm {
             FormField::StockQty => self.stock_qty = value,
             FormField::LowStockThreshold => self.low_stock_threshold = value,
             FormField::Description => self.description = value,
+            FormField::Location => self.location = value,
             FormField::GstRate => self.gst_rate = value,
         }
     }
@@ -188,6 +194,7 @@ impl ItemForm {
             FormField::StockQty => self.stock_qty.clone(),
             FormField::LowStockThreshold => self.low_stock_threshold.clone(),
             FormField::Description => self.description.clone(),
+            FormField::Location => self.location.clone(),
             FormField::GstRate => self.gst_rate.clone(),
         }
     }
@@ -202,6 +209,7 @@ struct ParsedForm {
     unit: Unit,
     low_stock_threshold: f64,
     description: String,
+    location: String,
     image: Option<Vec<u8>>,
     gst_rate_bp: Option<i64>,
 }
@@ -253,6 +261,7 @@ fn parse_form(form: &ItemForm) -> Result<ParsedForm, String> {
         unit: form.unit,
         low_stock_threshold,
         description: form.description.trim().to_string(),
+        location: form.location.trim().to_string(),
         image: form.image.clone(),
         gst_rate_bp,
     })
@@ -265,7 +274,7 @@ pub fn submit(state: &mut State) -> Task<Message> {
     let parsed = match parse_form(form) {
         Ok(p) => p,
         Err(e) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             return Task::none();
         }
     };
@@ -286,6 +295,7 @@ pub fn submit(state: &mut State) -> Task<Message> {
                         parsed.unit,
                         parsed.low_stock_threshold,
                         &parsed.description,
+                        &parsed.location,
                         parsed.image.as_deref(),
                         parsed.gst_rate_bp,
                     )
@@ -301,6 +311,7 @@ pub fn submit(state: &mut State) -> Task<Message> {
                         parsed.unit,
                         parsed.low_stock_threshold,
                         &parsed.description,
+                        &parsed.location,
                         parsed.image.as_deref(),
                         parsed.gst_rate_bp,
                     )
@@ -375,7 +386,7 @@ pub fn current_page(state: &State) -> (Vec<&Item>, usize, usize) {
 }
 
 fn list_view(state: &State) -> Element<'_, Message> {
-    let search = text_input("Search items...", &state.search_query)
+    let search = common::field("Search items...", &state.search_query)
         .on_input(Message::SearchChanged)
         .padding(10)
         .size(16)
@@ -511,30 +522,37 @@ fn form_view(form: &ItemForm, default_gst_bp: i64) -> Element<'_, Message> {
 
     let mut fields = column![
         text(title).size(22),
-        labeled("Name *", text_input("e.g. PVC Pipe 1 inch", &form.name).on_input(|v| Message::FormFieldChanged(FormField::Name, v)).padding(10).size(16)),
-        labeled("Buy price (₹) *", text_input("80.00", &form.buy_price).on_input(|v| Message::FormFieldChanged(FormField::BuyPrice, v)).padding(10).size(16)),
-        labeled("Sell price (₹) *", text_input("120.00", &form.sell_price).on_input(|v| Message::FormFieldChanged(FormField::SellPrice, v)).padding(10).size(16)),
+        labeled("Name *", common::field("e.g. PVC Pipe 1 inch", &form.name).on_input(|v| Message::FormFieldChanged(FormField::Name, v))),
+        labeled("Buy price (₹) *", common::field("80.00", &form.buy_price).on_input(|v| Message::FormFieldChanged(FormField::BuyPrice, v))),
+        labeled("Sell price (₹) *", common::field("120.00", &form.sell_price).on_input(|v| Message::FormFieldChanged(FormField::SellPrice, v))),
         labeled(
             "Unit *",
             pick_list(Unit::ALL, Some(form.unit), Message::FormUnitSelected).padding(10),
         ),
         labeled(
             "Low stock alert below *",
-            text_input("5", &form.low_stock_threshold)
+            common::field("5", &form.low_stock_threshold)
                 .on_input(|v| Message::FormFieldChanged(FormField::LowStockThreshold, v))
                 .padding(10)
                 .size(16),
         ),
         labeled(
             "Description (optional)",
-            text_input("e.g. 10mm dia, galvanized", &form.description)
+            common::field("e.g. 10mm dia, galvanized", &form.description)
                 .on_input(|v| Message::FormFieldChanged(FormField::Description, v))
+                .padding(10)
+                .size(16),
+        ),
+        labeled(
+            "Where it is kept (optional)",
+            common::field("e.g. Rack 4, Shelf B — or Godown", &form.location)
+                .on_input(|v| Message::FormFieldChanged(FormField::Location, v))
                 .padding(10)
                 .size(16),
         ),
         column![
             text(format!("GST rate % (blank = shop default, {})", money::format_gst_rate_bp(default_gst_bp))).size(14),
-            text_input("e.g. 18", &form.gst_rate).on_input(|v| Message::FormFieldChanged(FormField::GstRate, v)).padding(10).size(16),
+            common::field("e.g. 18", &form.gst_rate).on_input(|v| Message::FormFieldChanged(FormField::GstRate, v)),
         ]
         .spacing(4),
         labeled("Photo (optional)", photo_controls),
@@ -545,7 +563,7 @@ fn form_view(form: &ItemForm, default_gst_bp: i64) -> Element<'_, Message> {
     if form.editing_id.is_none() {
         fields = fields.push(labeled(
             "Opening stock *",
-            text_input("0", &form.stock_qty)
+            common::field("0", &form.stock_qty)
                 .on_input(|v| Message::FormFieldChanged(FormField::StockQty, v))
                 .padding(10)
                 .size(16),
@@ -603,6 +621,10 @@ fn detail_view<'a>(item: &'a Item, image_bytes: Option<&'a [u8]>, default_gst_bp
     let body = column![
         row![photo, column![text(&item.name).size(24), description].spacing(theme::SPACE_SM)].spacing(theme::SPACE_LG),
         stats_panel,
+        detail_row(
+            "Kept at",
+            if item.location.is_empty() { "Not recorded".to_string() } else { item.location.clone() },
+        ),
         detail_row("Low-stock alert below", format!("{:.1} {}", item.low_stock_threshold, item.unit)),
         detail_row(
             "GST rate",
@@ -637,11 +659,11 @@ fn purchase_view(form: &PurchaseForm) -> Element<'_, Message> {
         text("Adds to this item's stock — the same ledger entry \"Sell Stock\" writes to, just in the other direction.").size(13).color(theme::MUTED_TEXT),
         labeled(
             "Quantity received *",
-            text_input("e.g. 10", &form.qty).on_input(|v| Message::PurchaseFieldChanged(PurchaseField::Qty, v)).padding(10).size(16),
+            common::field("e.g. 10", &form.qty).on_input(|v| Message::PurchaseFieldChanged(PurchaseField::Qty, v)),
         ),
         labeled(
             "Buy price (₹) per unit *",
-            text_input("80.00", &form.price).on_input(|v| Message::PurchaseFieldChanged(PurchaseField::Price, v)).padding(10).size(16),
+            common::field("80.00", &form.price).on_input(|v| Message::PurchaseFieldChanged(PurchaseField::Price, v)),
         ),
         row![
             button(text("Save").size(16)).style(theme::success_button).padding([10, 24]).on_press(Message::SubmitPurchase),
@@ -697,8 +719,8 @@ mod tests {
             stock_qty: 10.0,
             unit: "piece".to_string(),
             low_stock_threshold: 5.0,
-            deleted: false,
             description: String::new(),
+            location: String::new(),
             has_image,
             gst_rate_bp: None,
         }

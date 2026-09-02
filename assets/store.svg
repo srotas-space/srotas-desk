@@ -1,0 +1,52 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#EEF2FF"/><stop offset="1" stop-color="#E0E7FF"/>
+    </linearGradient>
+    <linearGradient id="wall" x1="96" y1="220" x2="96" y2="430" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/><stop offset="1" stop-color="#EDF1F7"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded background -->
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+
+  <!-- store body -->
+  <rect x="112" y="232" width="288" height="196" rx="16" fill="url(#wall)" stroke="#C7D2FE" stroke-width="3"/>
+
+  <!-- awning -->
+  <path d="M92 168 h328 a12 12 0 0 1 12 12 v40 H80 v-40 a12 12 0 0 1 12-12 Z" fill="#4F46E5"/>
+  <g fill="#6366F1">
+    <rect x="80" y="180" width="58.6" height="40"/>
+    <rect x="197.2" y="180" width="58.6" height="40"/>
+    <rect x="314.4" y="180" width="58.6" height="40"/>
+  </g>
+  <!-- awning scallops -->
+  <g fill="#4F46E5">
+    <path d="M80 220 h58.6 v14 a29.3 29.3 0 0 1 -58.6 0 Z"/>
+    <path d="M197.2 220 h58.6 v14 a29.3 29.3 0 0 1 -58.6 0 Z"/>
+    <path d="M314.4 220 h58.6 v14 a29.3 29.3 0 0 1 -58.6 0 Z"/>
+  </g>
+  <g fill="#6366F1">
+    <path d="M138.6 220 h58.6 v14 a29.3 29.3 0 0 1 -58.6 0 Z"/>
+    <path d="M255.8 220 h58.6 v14 a29.3 29.3 0 0 1 -58.6 0 Z"/>
+    <path d="M373 220 h27 v14 a29.3 29.3 0 0 1 -27 6 Z"/>
+    <path d="M80 220 h0 v14 a29.3 29.3 0 0 0 27 6 v-20 Z" opacity="0"/>
+  </g>
+
+  <!-- sign board -->
+  <rect x="196" y="126" width="120" height="30" rx="8" fill="#312E81"/>
+  <rect x="210" y="137" width="92" height="8" rx="4" fill="#A5B4FC"/>
+
+  <!-- door -->
+  <rect x="228" y="322" width="56" height="106" rx="8" fill="#4F46E5"/>
+  <circle cx="272" cy="378" r="5" fill="#C7D2FE"/>
+
+  <!-- window -->
+  <rect x="140" y="322" width="66" height="66" rx="8" fill="#DBEAFE" stroke="#C7D2FE" stroke-width="3"/>
+  <path d="M140 355 h66 M173 322 v66" stroke="#93C5FD" stroke-width="3"/>
+
+  <!-- window right -->
+  <rect x="306" y="322" width="66" height="66" rx="8" fill="#DBEAFE" stroke="#C7D2FE" stroke-width="3"/>
+  <path d="M306 355 h66 M339 322 v66" stroke="#93C5FD" stroke-width="3"/>
+</svg>

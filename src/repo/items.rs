@@ -3,6 +3,18 @@ use sqlx::SqlitePool;
 use super::RepoError;
 use crate::models::{Item, Unit};
 
+/// The column list every `Item` query selects (or `RETURNING`s). A macro
+/// rather than a `const` so the queries stay `concat!`ed string literals —
+/// sqlx refuses a runtime-built query unless it is explicitly waved
+/// through as injection-audited, and there is no reason to give up that
+/// check to avoid retyping a column list.
+macro_rules! item_columns {
+    () => {
+        "id, name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold, \
+         description, location, (image IS NOT NULL) AS has_image, gst_rate_bp"
+    };
+}
+
 /// Case-insensitive duplicate-name check, used before every insert/update
 /// so the shopkeeper gets a friendly error instead of a raw SQL constraint
 /// failure. `exclude_id` lets an edit ignore the row being edited itself.
@@ -30,6 +42,7 @@ pub async fn add_item(
     unit: Unit,
     low_stock_threshold: f64,
     description: &str,
+    location: &str,
     image: Option<&[u8]>,
     gst_rate_bp: Option<i64>,
 ) -> Result<Item, RepoError> {
@@ -37,11 +50,11 @@ pub async fn add_item(
         return Err(RepoError::DuplicateItemName { name: name.to_string() });
     }
 
-    let item = sqlx::query_as::<_, Item>(
-        "INSERT INTO items (name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold, description, image, gst_rate_bp) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
-         RETURNING id, name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold, deleted, description, (image IS NOT NULL) AS has_image, gst_rate_bp",
-    )
+    let item = sqlx::query_as::<_, Item>(concat!(
+        "INSERT INTO items (name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold, description, location, image, gst_rate_bp) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         RETURNING ", item_columns!()
+    ))
     .bind(name)
     .bind(buy_price_paise)
     .bind(sell_price_paise)
@@ -49,6 +62,7 @@ pub async fn add_item(
     .bind(unit.as_str())
     .bind(low_stock_threshold)
     .bind(description)
+    .bind(location)
     .bind(image)
     .bind(gst_rate_bp)
     .fetch_one(pool)
@@ -70,6 +84,7 @@ pub async fn edit_item(
     unit: Unit,
     low_stock_threshold: f64,
     description: &str,
+    location: &str,
     image: Option<&[u8]>,
     gst_rate_bp: Option<i64>,
 ) -> Result<Item, RepoError> {
@@ -77,19 +92,20 @@ pub async fn edit_item(
         return Err(RepoError::DuplicateItemName { name: name.to_string() });
     }
 
-    let item = sqlx::query_as::<_, Item>(
+    let item = sqlx::query_as::<_, Item>(concat!(
         "UPDATE items \
          SET name = ?, buy_price_paise = ?, sell_price_paise = ?, unit = ?, low_stock_threshold = ?, \
-             description = ?, image = ?, gst_rate_bp = ? \
+             description = ?, location = ?, image = ?, gst_rate_bp = ? \
          WHERE id = ? AND deleted = 0 \
-         RETURNING id, name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold, deleted, description, (image IS NOT NULL) AS has_image, gst_rate_bp",
-    )
+         RETURNING ", item_columns!()
+    ))
     .bind(name)
     .bind(buy_price_paise)
     .bind(sell_price_paise)
     .bind(unit.as_str())
     .bind(low_stock_threshold)
     .bind(description)
+    .bind(location)
     .bind(image)
     .bind(gst_rate_bp)
     .bind(id)
@@ -114,31 +130,9 @@ pub async fn delete_item(pool: &SqlitePool, id: i64) -> Result<(), RepoError> {
 }
 
 pub async fn list_items(pool: &SqlitePool) -> Result<Vec<Item>, RepoError> {
-    let items = sqlx::query_as::<_, Item>(
-        "SELECT id, name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold, deleted, \
-                description, (image IS NOT NULL) AS has_image, gst_rate_bp \
-         FROM items WHERE deleted = 0 ORDER BY name",
-    )
-    .fetch_all(pool)
-    .await?;
-    Ok(items)
-}
-
-pub async fn search_items(pool: &SqlitePool, query: &str) -> Result<Vec<Item>, RepoError> {
-    // Escape LIKE's own wildcards so a shopkeeper searching for e.g. a
-    // product literally named "50%" doesn't get a pattern match instead.
-    let escaped = query
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    let pattern = format!("%{escaped}%");
-
-    let items = sqlx::query_as::<_, Item>(
-        "SELECT id, name, buy_price_paise, sell_price_paise, stock_qty, unit, low_stock_threshold, deleted, \
-                description, (image IS NOT NULL) AS has_image, gst_rate_bp \
-         FROM items WHERE deleted = 0 AND name LIKE ? ESCAPE '\\' ORDER BY name",
-    )
-    .bind(pattern)
+    let items = sqlx::query_as::<_, Item>(concat!(
+        "SELECT ", item_columns!(), " FROM items WHERE deleted = 0 ORDER BY name"
+    ))
     .fetch_all(pool)
     .await?;
     Ok(items)
@@ -154,4 +148,53 @@ pub async fn get_item_image(pool: &SqlitePool, id: i64) -> Result<Option<Vec<u8>
         .await?
         .flatten();
     Ok(image)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+
+    async fn test_pool() -> SqlitePool {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:").unwrap();
+        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(options).await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn a_location_survives_the_round_trip_and_may_be_blank() {
+        let pool = test_pool().await;
+
+        let placed = add_item(&pool, "Hex Bolt", 100, 200, 5.0, Unit::Piece, 2.0, "", "Rack 4, Shelf B", None, None)
+            .await
+            .unwrap();
+        let unplaced = add_item(&pool, "Hex Nut", 50, 90, 5.0, Unit::Piece, 2.0, "", "", None, None).await.unwrap();
+
+        assert_eq!(placed.location, "Rack 4, Shelf B");
+        assert_eq!(unplaced.location, "");
+
+        // And it comes back on the list the whole app reads from.
+        let listed = list_items(&pool).await.unwrap();
+        let found = listed.iter().find(|i| i.id == placed.id).unwrap();
+        assert_eq!(found.location, "Rack 4, Shelf B");
+    }
+
+    #[tokio::test]
+    async fn editing_an_item_can_move_it_to_another_rack() {
+        let pool = test_pool().await;
+        let item = add_item(&pool, "Hex Bolt", 100, 200, 5.0, Unit::Piece, 2.0, "", "Rack 4", None, None)
+            .await
+            .unwrap();
+
+        let moved = edit_item(&pool, item.id, "Hex Bolt", 100, 200, Unit::Piece, 2.0, "", "Godown", None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(moved.location, "Godown");
+        // Stock is untouched by an edit — it only moves through purchases
+        // and sales.
+        assert_eq!(moved.stock_qty, 5.0);
+    }
 }

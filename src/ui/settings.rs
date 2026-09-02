@@ -1,7 +1,7 @@
 use iced::widget::{button, column, container, image, row, scrollable, text, text_input};
 use iced::{Element, Length, Task};
 
-use super::{Message, State};
+use super::{Message, Notice, State};
 use crate::ui::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,14 +110,6 @@ impl SecurityForm {
             SecurityField::ConfirmPin => self.confirm_pin = value,
         }
     }
-
-    pub fn get_field(&self, field: SecurityField) -> String {
-        match field {
-            SecurityField::CurrentPin => self.current_pin.clone(),
-            SecurityField::NewPin => self.new_pin.clone(),
-            SecurityField::ConfirmPin => self.confirm_pin.clone(),
-        }
-    }
 }
 
 pub fn choose_logo() -> Task<Message> {
@@ -140,7 +132,7 @@ pub fn choose_logo() -> Task<Message> {
 pub fn submit_profile(state: &mut State) -> Task<Message> {
     let form = &state.profile_form;
     if form.shop_name.trim().is_empty() {
-        state.status = Some("shop name cannot be empty".into());
+        state.notice = Some(Notice::error("shop name cannot be empty"));
         return Task::none();
     }
     let gst_rate_bp = if form.default_gst_rate.trim().is_empty() {
@@ -149,7 +141,7 @@ pub fn submit_profile(state: &mut State) -> Task<Message> {
         match crate::money::rupees_to_paise(&form.default_gst_rate) {
             Some(v) => v,
             None => {
-                state.status = Some("default GST rate must be a valid percentage, e.g. 18 or 18.00".into());
+                state.notice = Some(Notice::error("default GST rate must be a valid percentage, e.g. 18 or 18.00"));
                 return Task::none();
             }
         }
@@ -180,39 +172,62 @@ pub fn submit_profile(state: &mut State) -> Task<Message> {
     )
 }
 
+/// Sets, changes, or removes the screen-lock PIN.
+///
+/// The format checks stay here (they're instant, and the shopkeeper should
+/// see "PIN must be 4 to 6 digits" the moment they press Save), but both
+/// the current-PIN check and the new hash are Argon2 work — tens of
+/// milliseconds each — so they happen off the UI thread.
 pub fn submit_pin(state: &mut State) -> Task<Message> {
     let form = &state.security_form;
-    let has_existing_pin = state.shop.as_ref().and_then(|s| s.pin.as_deref()).is_some();
+    let has_existing_pin = state.shop.as_ref().is_some_and(|s| s.has_pin());
 
-    if has_existing_pin {
-        let expected = state.shop.as_ref().and_then(|s| s.pin.as_deref()).unwrap_or("");
-        if form.current_pin.trim() != expected {
-            state.status = Some("current PIN is incorrect".into());
+    let new_pin = match crate::pin::validate_new(&form.new_pin, &form.confirm_pin) {
+        Ok(pin) => pin,
+        Err(e) => {
+            state.notice = Some(Notice::error(e));
             return Task::none();
         }
-    }
-
-    let new_pin = form.new_pin.trim();
-    let new_pin = if new_pin.is_empty() {
-        None
-    } else {
-        if !(4..=6).contains(&new_pin.len()) || !new_pin.chars().all(|c| c.is_ascii_digit()) {
-            state.status = Some("new PIN must be 4 to 6 digits".into());
-            return Task::none();
-        }
-        if new_pin != form.confirm_pin.trim() {
-            state.status = Some("new PIN and confirmation don't match".into());
-            return Task::none();
-        }
-        Some(new_pin.to_string())
     };
+    if has_existing_pin && form.current_pin.trim().is_empty() {
+        state.notice = Some(Notice::error("enter your current PIN to change it"));
+        return Task::none();
+    }
 
     let Some(pool) = state.pool.clone() else {
         return Task::none();
     };
+    let current_pin = form.current_pin.trim().to_string();
+
     Task::perform(
-        async move { crate::repo::update_pin(&pool, new_pin.as_deref()).await.map(|_| new_pin) },
-        |result| Message::PinChanged(result.map_err(|e| e.to_string())),
+        async move {
+            if has_existing_pin {
+                let stored = crate::repo::get_pin_hash(&pool).await.map_err(|e| e.to_string())?;
+                let matches = match stored {
+                    Some(stored) => tokio::task::spawn_blocking(move || crate::pin::verify(&current_pin, &stored))
+                        .await
+                        .map_err(|e| format!("could not check that PIN: {e}"))?,
+                    // The PIN vanished from under us (a reset in another
+                    // window); nothing left to prove.
+                    None => true,
+                };
+                if !matches {
+                    return Err("current PIN is incorrect".to_string());
+                }
+            }
+
+            let hash = match new_pin {
+                Some(pin) => Some(
+                    tokio::task::spawn_blocking(move || crate::pin::hash(&pin))
+                        .await
+                        .map_err(|e| format!("could not secure that PIN: {e}"))??,
+                ),
+                None => None,
+            };
+            crate::repo::update_pin(&pool, hash.as_deref()).await.map_err(|e| e.to_string())?;
+            Ok(hash)
+        },
+        Message::PinChanged,
     )
 }
 
@@ -222,115 +237,216 @@ pub fn view(state: &State) -> Element<'_, Message> {
         SettingsTab::Security => security_view(state),
     };
 
-    let tabs = row![
-        tab_button("Profile", SettingsTab::Profile, state.settings_tab),
-        tab_button("Security", SettingsTab::Security, state.settings_tab),
-    ]
-    .spacing(8)
-    .padding(12);
+    let tabs = container(
+        container(
+            row![
+                tab_button("Profile", SettingsTab::Profile, state.settings_tab),
+                tab_button("Security", SettingsTab::Security, state.settings_tab),
+            ]
+            .spacing(theme::SPACE_XS),
+        )
+        .style(theme::panel)
+        .padding(theme::SPACE_XS as u16),
+    )
+    .padding([theme::SPACE_MD as u16, theme::SPACE_MD as u16]);
 
     column![tabs, content].width(Length::Fill).height(Length::Fill).into()
 }
 
 fn tab_button(label: &str, target: SettingsTab, current: SettingsTab) -> Element<'static, Message> {
-    let btn = button(text(label.to_string())).on_press(Message::SettingsTabSelected(target));
+    let btn = button(text(label.to_string()).size(theme::TEXT_SMALL).font(theme::SEMIBOLD))
+        .padding([9, 20])
+        .on_press(Message::SettingsTabSelected(target));
     if target == current {
-        btn.style(theme::primary_button).into()
+        btn.style(theme::tab_selected).into()
     } else {
-        btn.style(theme::secondary_button).into()
+        btn.style(theme::tab_idle).into()
     }
+}
+
+/// The shared frame around both settings tabs — a centred card on a
+/// scrollable page, so the two never drift apart in width or padding.
+fn form_page<'a>(fields: iced::widget::Column<'a, Message>) -> Element<'a, Message> {
+    scrollable(
+        container(container(fields).style(theme::card).padding(theme::SPACE_LG))
+            .width(Length::Fill)
+            .padding([0, theme::SPACE_MD as u16])
+            .align_x(iced::Alignment::Center),
+    )
+    .height(Length::Fill)
+    .into()
 }
 
 fn profile_view(state: &State) -> Element<'_, Message> {
     let form = &state.profile_form;
 
     let logo_preview: Element<'_, Message> = if let Some(bytes) = &form.logo {
-        image::Image::new(image::Handle::from_bytes(bytes.clone())).width(96).height(96).content_fit(iced::ContentFit::Cover).into()
+        logo_image(bytes)
     } else if form.logo_removed {
-        container(text("No logo").size(13)).width(96).height(96).style(theme::card).padding(theme::SPACE_SM).align_x(iced::Alignment::Center).align_y(iced::Alignment::Center).into()
-    } else if state.shop.as_ref().map(|s| s.has_logo).unwrap_or(false) {
+        logo_placeholder("No logo")
+    } else if state.shop.as_ref().is_some_and(|s| s.has_logo) {
         match &state.shop_logo {
-            Some(bytes) => image::Image::new(image::Handle::from_bytes(bytes.clone())).width(96).height(96).content_fit(iced::ContentFit::Cover).into(),
-            None => container(text("Loading...").size(13)).width(96).height(96).style(theme::card).padding(theme::SPACE_SM).into(),
+            Some(bytes) => logo_image(bytes),
+            None => logo_placeholder("Loading..."),
         }
     } else {
-        container(text("No logo").size(13)).width(96).height(96).style(theme::card).padding(theme::SPACE_SM).align_x(iced::Alignment::Center).align_y(iced::Alignment::Center).into()
+        logo_placeholder("No logo")
     };
 
-    let logo_controls = column![
+    let logo_controls = row![
         logo_preview,
-        row![
-            button(text("Choose Logo").size(13)).style(theme::secondary_button).padding([8, 14]).on_press(Message::ChooseProfileLogo),
-            button(text("Remove").size(13)).style(theme::secondary_button).padding([8, 14]).on_press(Message::RemoveProfileLogo),
+        column![
+            text("Shown in the app header and on printed bills.").size(theme::TEXT_SMALL).color(theme::MUTED_TEXT),
+            row![
+                button(text("Choose Logo").size(theme::TEXT_SMALL))
+                    .style(theme::secondary_button)
+                    .padding([8, 16])
+                    .on_press(Message::ChooseProfileLogo),
+                button(text("Remove").size(theme::TEXT_SMALL))
+                    .style(theme::secondary_button)
+                    .padding([8, 16])
+                    .on_press(Message::RemoveProfileLogo),
+            ]
+            .spacing(theme::SPACE_SM),
         ]
         .spacing(theme::SPACE_SM),
     ]
-    .spacing(theme::SPACE_SM);
+    .spacing(theme::SPACE_MD)
+    .align_y(iced::Alignment::Center);
 
     let fields = column![
-        text("Shop Profile").size(20),
-        labeled("Shop name *", text_input("Shop name", &form.shop_name).on_input(|v| Message::ProfileFieldChanged(ProfileField::ShopName, v)).padding(10).size(16)),
-        labeled("Owner name", text_input("Owner name", &form.owner_name).on_input(|v| Message::ProfileFieldChanged(ProfileField::OwnerName, v)).padding(10).size(16)),
-        labeled("Phone", text_input("Phone", &form.phone).on_input(|v| Message::ProfileFieldChanged(ProfileField::Phone, v)).padding(10).size(16)),
-        labeled("Address", text_input("Address", &form.address).on_input(|v| Message::ProfileFieldChanged(ProfileField::Address, v)).padding(10).size(16)),
-        labeled("GSTIN (optional)", text_input("e.g. 22AAAAA0000A1Z5", &form.gstin).on_input(|v| Message::ProfileFieldChanged(ProfileField::Gstin, v)).padding(10).size(16)),
+        text("Shop Profile").size(theme::TEXT_TITLE).font(theme::SEMIBOLD),
+        text("These details head every bill and receipt you print.").size(theme::TEXT_SMALL).color(theme::MUTED_TEXT),
+        labeled("Shop name *", profile_input("Shop name", &form.shop_name, ProfileField::ShopName)),
+        labeled("Owner name", profile_input("Owner name", &form.owner_name, ProfileField::OwnerName)),
+        labeled("Phone", profile_input("Phone", &form.phone, ProfileField::Phone)),
+        labeled("Address", profile_input("Shop address", &form.address, ProfileField::Address)),
+        labeled("GSTIN (optional)", profile_input("e.g. 22AAAAA0000A1Z5", &form.gstin, ProfileField::Gstin)),
         labeled(
             "Default GST rate % (applies unless an item overrides it)",
-            text_input("e.g. 18", &form.default_gst_rate).on_input(|v| Message::ProfileFieldChanged(ProfileField::DefaultGstRate, v)).padding(10).size(16),
+            profile_input("e.g. 18", &form.default_gst_rate, ProfileField::DefaultGstRate),
         ),
         labeled("Logo (optional)", logo_controls),
-        button(text("Save Profile").size(15)).style(theme::success_button).padding([10, 24]).on_press(Message::SubmitProfile),
+        button(text("Save Profile").size(theme::TEXT_BODY).font(theme::SEMIBOLD))
+            .style(theme::success_button)
+            .padding(theme::CONTROL_PADDING)
+            .on_press(Message::SubmitProfile),
     ]
     .spacing(theme::SPACE_MD)
-    .max_width(420);
+    .max_width(440);
 
-    scrollable(
-        container(container(fields).style(theme::card).padding(theme::SPACE_LG))
-            .width(Length::Fill)
-            .padding(theme::SPACE_MD)
-            .align_x(iced::Alignment::Center),
-    )
-    .height(Length::Fill)
-    .into()
+    form_page(fields)
+}
+
+fn profile_input<'a>(placeholder: &'a str, value: &'a str, field: ProfileField) -> Element<'a, Message> {
+    text_input(placeholder, value)
+        .on_input(move |v| Message::ProfileFieldChanged(field, v))
+        .style(theme::field)
+        .padding(theme::FIELD_PADDING)
+        .size(theme::TEXT_BODY)
+        .into()
+}
+
+fn logo_image(bytes: &[u8]) -> Element<'static, Message> {
+    image::Image::new(image::Handle::from_bytes(bytes.to_vec()))
+        .width(88)
+        .height(88)
+        .content_fit(iced::ContentFit::Cover)
+        .into()
+}
+
+fn logo_placeholder(label: &str) -> Element<'static, Message> {
+    container(text(label.to_string()).size(theme::TEXT_SMALL).color(theme::MUTED_TEXT))
+        .width(88)
+        .height(88)
+        .style(theme::panel)
+        .align_x(iced::Alignment::Center)
+        .align_y(iced::Alignment::Center)
+        .into()
 }
 
 fn security_view(state: &State) -> Element<'_, Message> {
     let form = &state.security_form;
-    let has_existing_pin = state.shop.as_ref().and_then(|s| s.pin.as_deref()).is_some();
+    let has_existing_pin = state.shop.as_ref().is_some_and(|s| s.has_pin());
 
     let mut fields = column![
-        text("Security").size(20),
-        text("Set a PIN to keep a casual passerby from opening this screen — this is a soft screen lock, not account security.").size(13).color(theme::MUTED_TEXT),
+        text("Security").size(theme::TEXT_TITLE).font(theme::SEMIBOLD),
+        text(
+            "A PIN locks this screen when you step away from the counter. \
+             It's stored as a one-way hash, so it stays unreadable even in a backup copy \
+             of the shop database."
+        )
+        .size(theme::TEXT_SMALL)
+        .color(theme::MUTED_TEXT),
     ]
     .spacing(theme::SPACE_MD)
-    .max_width(420);
+    .max_width(440);
 
     if has_existing_pin {
         fields = fields.push(labeled(
             "Current PIN",
-            text_input("Enter current PIN", &form.current_pin).on_input(|v| Message::SecurityFieldChanged(SecurityField::CurrentPin, v)).secure(true).padding(10).size(16),
+            text_input("Enter current PIN", &form.current_pin)
+                .on_input(|v| Message::SecurityFieldChanged(SecurityField::CurrentPin, v))
+                .secure(true)
+                .style(theme::field)
+                .padding(theme::FIELD_PADDING)
+                .size(theme::TEXT_BODY),
         ));
     }
     fields = fields.push(labeled(
-        "New PIN (blank to remove)",
-        text_input("4-6 digits", &form.new_pin).on_input(|v| Message::SecurityFieldChanged(SecurityField::NewPin, v)).secure(true).padding(10).size(16),
+        "New PIN (blank to remove the lock)",
+        text_input("4-6 digits", &form.new_pin)
+            .on_input(|v| Message::SecurityFieldChanged(SecurityField::NewPin, v))
+            .secure(true)
+            .style(theme::field)
+            .padding(theme::FIELD_PADDING)
+            .size(theme::TEXT_BODY),
     ));
     fields = fields.push(labeled(
         "Confirm new PIN",
-        text_input("repeat PIN", &form.confirm_pin).on_input(|v| Message::SecurityFieldChanged(SecurityField::ConfirmPin, v)).secure(true).padding(10).size(16),
+        text_input("repeat PIN", &form.confirm_pin)
+            .on_input(|v| Message::SecurityFieldChanged(SecurityField::ConfirmPin, v))
+            .on_submit(Message::SubmitPinChange)
+            .secure(true)
+            .style(theme::field)
+            .padding(theme::FIELD_PADDING)
+            .size(theme::TEXT_BODY),
     ));
-    fields = fields.push(button(text("Save").size(15)).style(theme::success_button).padding([10, 24]).on_press(Message::SubmitPinChange));
 
-    scrollable(
-        container(container(fields).style(theme::card).padding(theme::SPACE_LG))
-            .width(Length::Fill)
-            .padding(theme::SPACE_MD)
-            .align_x(iced::Alignment::Center),
-    )
-    .height(Length::Fill)
-    .into()
+    fields = fields.push(
+        container(
+            column![
+                text(format!(
+                    "After {} wrong PINs the lock screen pauses for 30 seconds, doubling with each \
+                     further attempt.",
+                    crate::pin::MAX_ATTEMPTS
+                ))
+                .size(theme::TEXT_SMALL),
+                text(
+                    "Forgotten the PIN? The lock screen's \"Forgot PIN?\" link resets it using \
+                     your license key."
+                )
+                .size(theme::TEXT_SMALL),
+            ]
+            .spacing(theme::SPACE_XS),
+        )
+        .style(theme::panel)
+        .padding(theme::SPACE_MD)
+        .width(Length::Fill),
+    );
+
+    fields = fields.push(
+        button(text("Save").size(theme::TEXT_BODY).font(theme::SEMIBOLD))
+            .style(theme::success_button)
+            .padding(theme::CONTROL_PADDING)
+            .on_press(Message::SubmitPinChange),
+    );
+
+    form_page(fields)
 }
 
 fn labeled<'a>(label: &'a str, widget: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    column![text(label).size(14), widget.into()].spacing(4).into()
+    column![text(label).size(theme::TEXT_SMALL).color(theme::MUTED_TEXT), widget.into()]
+        .spacing(theme::SPACE_XS)
+        .into()
 }

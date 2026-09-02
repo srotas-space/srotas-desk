@@ -14,12 +14,11 @@ mod theme;
 use std::path::PathBuf;
 
 use iced::widget::{button, column, container, row, svg, text};
-use iced::{Element, Length, Task};
+use iced::{Color, Element, Length, Task};
 use sqlx::SqlitePool;
 
-use crate::models::{Item, ShopProfile, Transaction};
+use crate::models::{Item, ShopProfile};
 use crate::money;
-use crate::repo::TransactionHistoryRow;
 use crate::ui::common::ItemOption;
 pub use items::ItemForm;
 
@@ -27,6 +26,13 @@ pub use items::ItemForm;
 /// project's asset files still being at some relative path on disk.
 const LOGO_SVG: &[u8] = include_bytes!("../../assets/logo.svg");
 const ICON_PNG: &[u8] = include_bytes!("../../assets/icon.png");
+
+/// The bundled typeface, in the three weights the app uses. Registered at
+/// startup so every platform renders identically — see `theme::FONT_FAMILY`
+/// for why the app doesn't just take each OS's default sans-serif.
+const FONT_REGULAR: &[u8] = include_bytes!("../../assets/fonts/Inter-Regular.ttf");
+const FONT_SEMIBOLD: &[u8] = include_bytes!("../../assets/fonts/Inter-SemiBold.ttf");
+const FONT_BOLD: &[u8] = include_bytes!("../../assets/fonts/Inter-Bold.ttf");
 
 fn logo_handle() -> svg::Handle {
     svg::Handle::from_memory(LOGO_SVG)
@@ -46,7 +52,7 @@ pub enum Stage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShopTab {
-    PurchasesAndSales,
+    Details,
     Billings,
     Reports,
 }
@@ -57,6 +63,37 @@ pub enum InventoryTab {
     Backup,
 }
 
+/// How loudly the status bar should say something. Every message used to
+/// render in the same alarming red, so "security settings saved" looked
+/// exactly like a failed save.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeKind {
+    Error,
+    Success,
+    Warning,
+}
+
+/// A one-line message shown in the status bar at the bottom of the window.
+#[derive(Debug, Clone)]
+pub struct Notice {
+    pub text: String,
+    pub kind: NoticeKind,
+}
+
+impl Notice {
+    pub fn error(text: impl Into<String>) -> Self {
+        Notice { text: text.into(), kind: NoticeKind::Error }
+    }
+
+    pub fn success(text: impl Into<String>) -> Self {
+        Notice { text: text.into(), kind: NoticeKind::Success }
+    }
+
+    pub fn warning(text: impl Into<String>) -> Self {
+        Notice { text: text.into(), kind: NoticeKind::Warning }
+    }
+}
+
 pub struct State {
     pool: Option<SqlitePool>,
     stage: Stage,
@@ -64,9 +101,10 @@ pub struct State {
     settings: crate::settings::Settings,
 
     items: Vec<Item>,
-    /// Set when something goes wrong (DB error, validation failure) so the
-    /// shopkeeper sees *something* rather than a silently-failed action.
-    status: Option<String>,
+    /// Set when an action finishes — well or badly — so the shopkeeper sees
+    /// *something* rather than a silently-failed (or silently-succeeded)
+    /// action.
+    notice: Option<Notice>,
     search_query: String,
     item_form: Option<ItemForm>,
     purchase_form: Option<items::PurchaseForm>,
@@ -91,20 +129,21 @@ pub struct State {
 
     activation: activation::ActivationState,
     register_form: register::RegisterForm,
-    login_pin_input: String,
-    login_error: Option<String>,
+    login: login::LoginState,
+    /// This machine's permanent device id, kept out of `activation` because
+    /// the PIN-reset flow needs it long after the activation screen is
+    /// gone — a reset is proved by a license key signed for this id.
+    device_id: String,
 
     shop_tab: ShopTab,
     sale_form: sale::SaleForm,
     /// Backing state for the searchable item picker on the billing screen.
     /// Rebuilt from `items` whenever that reloads — see `ItemsLoaded`.
     sale_item_combo: iced::widget::combo_box::State<ItemOption>,
-    recent_sales: Vec<TransactionHistoryRow>,
-    sale_page: usize,
-    /// The sale currently open on the read-only detail screen (`None`
-    /// means the Sales history list is showing instead).
-    sale_viewing: Option<TransactionHistoryRow>,
-    sale_confirming_delete_id: Option<i64>,
+    /// Page index of the low-stock list on Shop → Details. Derived from
+    /// `items`, so it needs no loading of its own — only clamping, which
+    /// `sale::low_stock_page` does on read.
+    low_stock_page: usize,
     reports: reports::ReportsState,
 
     bills: bills::BillsState,
@@ -139,7 +178,7 @@ impl Default for State {
             shop: None,
             settings: crate::settings::Settings::default(),
             items: Vec::new(),
-            status: None,
+            notice: None,
             search_query: String::new(),
             item_form: None,
             purchase_form: None,
@@ -153,15 +192,12 @@ impl Default for State {
             item_thumbnails: std::collections::HashMap::new(),
             activation: activation::ActivationState::default(),
             register_form: register::RegisterForm::default(),
-            login_pin_input: String::new(),
-            login_error: None,
-            shop_tab: ShopTab::PurchasesAndSales,
+            login: login::LoginState::default(),
+            device_id: String::new(),
+            shop_tab: ShopTab::Details,
             sale_form: sale::SaleForm::default(),
             sale_item_combo: iced::widget::combo_box::State::new(Vec::new()),
-            recent_sales: Vec::new(),
-            sale_page: 0,
-            sale_viewing: None,
-            sale_confirming_delete_id: None,
+            low_stock_page: 0,
             reports: reports::ReportsState::default(),
             bills: bills::BillsState::default(),
             bill_item_combo: iced::widget::combo_box::State::new(Vec::new()),
@@ -184,13 +220,12 @@ pub enum EditableField {
     Register(register::Field),
     Sale(sale::Field),
     Profile(settings::ProfileField),
-    Security(settings::SecurityField),
     Reports(reports::Field),
     Search,
-    LoginPin,
     BillQty,
     BillPrice,
     BillDiscount,
+    BillCustomer,
     ActivationKey,
 }
 
@@ -231,11 +266,6 @@ fn apply_edit(state: &mut State, field: EditableField, value: String) -> String 
             state.profile_form.set_field(f, value);
             old
         }
-        EditableField::Security(f) => {
-            let old = state.security_form.get_field(f);
-            state.security_form.set_field(f, value);
-            old
-        }
         EditableField::Reports(f) => {
             let old = state.reports.get_field(f);
             state.reports.set_field(f, value);
@@ -246,10 +276,10 @@ fn apply_edit(state: &mut State, field: EditableField, value: String) -> String 
             state.items_page = 0;
             old
         }
-        EditableField::LoginPin => std::mem::replace(&mut state.login_pin_input, value),
         EditableField::BillQty => std::mem::replace(&mut state.bills.qty_input, value),
         EditableField::BillPrice => std::mem::replace(&mut state.bills.price_input, value),
         EditableField::BillDiscount => std::mem::replace(&mut state.bills.discount_input, value),
+        EditableField::BillCustomer => std::mem::replace(&mut state.bills.customer_input, value),
         EditableField::ActivationKey => std::mem::replace(&mut state.activation.key_input, value),
     }
 }
@@ -334,7 +364,7 @@ pub enum Message {
     PurchaseFieldChanged(items::PurchaseField, String),
     SubmitPurchase,
     CancelPurchaseForm,
-    PurchaseRecorded(Result<Transaction, String>),
+    PurchaseRecorded(Result<(), String>),
 
     RegisterFieldChanged(register::Field, String),
     SubmitRegister,
@@ -342,30 +372,28 @@ pub enum Message {
 
     LoginPinChanged(String),
     SubmitLogin,
+    LoginVerified(Result<login::Outcome, String>),
+    ForgotPinPressed,
+    CancelPinReset,
+    PinResetFieldChanged(login::ResetField, String),
+    SubmitPinReset,
+    PinResetCompleted(Result<Option<String>, String>),
+    /// One-per-second pulse, subscribed to only while the login screen is
+    /// counting down a lockout — see `subscription`.
+    Tick,
 
     SaleItemSelected(ItemOption),
     SaleFieldChanged(sale::Field, String),
     SubmitSale,
-    SaleRecorded(Result<Transaction, String>),
-    SaleHistoryLoaded(Result<Vec<TransactionHistoryRow>, String>),
-    SalesPageNext,
-    SalesPagePrev,
-    OpenSaleView(i64),
-    SaleViewLoaded(Result<TransactionHistoryRow, String>),
-    CloseSaleView,
-    OpenSaleEdit(i64),
-    SaleEditLoaded(Result<TransactionHistoryRow, String>),
-    CancelSaleEdit,
-    DeleteSalePressed(i64),
-    SaleDeleted(Result<i64, String>),
-    PrintSalePressed(i64),
-    DownloadSalePressed(i64),
-    SalePdfReady(Result<(PathBuf, bool), String>),
+    SaleRecorded(Result<(), String>),
+    LowStockPageNext,
+    LowStockPagePrev,
 
     BillItemSelected(ItemOption),
     BillQtyChanged(String),
     BillPriceChanged(String),
     BillDiscountChanged(String),
+    BillCustomerChanged(String),
     AddBillLine,
     RemoveBillLine(usize),
     SubmitBill,
@@ -426,12 +454,16 @@ pub fn run() -> iced::Result {
         view,
     )
     .title("Srotas Desk")
+    .font(FONT_REGULAR)
+    .font(FONT_SEMIBOLD)
+    .font(FONT_BOLD)
+    .default_font(theme::REGULAR)
     .theme(|_state: &State| theme::theme())
     .window(iced::window::Settings {
         icon,
         ..iced::window::Settings::default()
     })
-    .subscription(|_state| keyboard_shortcuts())
+    .subscription(subscription)
     .run()
 }
 
@@ -443,6 +475,24 @@ pub fn run() -> iced::Result {
 /// doesn't recognize these combinations, so they reach here untouched.
 /// Both Ctrl and the platform's native command key (⌘ on macOS) are
 /// accepted, rather than only whichever one is "correct" for the OS.
+/// Everything the app listens to. The lockout countdown on the login
+/// screen is the only thing that needs a clock, and it only needs one
+/// while it's actually counting down — so the timer is subscribed
+/// conditionally rather than left ticking for the life of the app.
+fn subscription(state: &State) -> iced::Subscription<Message> {
+    let counting_down = state.stage == Stage::Login
+        && state.shop.as_ref().and_then(|s| s.lock_remaining_secs(chrono::Utc::now())).is_some();
+
+    if counting_down {
+        iced::Subscription::batch([
+            keyboard_shortcuts(),
+            iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick),
+        ])
+    } else {
+        keyboard_shortcuts()
+    }
+}
+
 fn keyboard_shortcuts() -> iced::Subscription<Message> {
     iced::keyboard::listen().map(|event| {
         let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
@@ -498,11 +548,12 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::perform(activation::check(for_license), Message::LicenseChecked)
         }
         Message::DbReady(Err(e)) => {
-            state.status = Some(format!("could not open database: {e}"));
+            state.notice = Some(Notice::error(format!("could not open database: {e}")));
             Task::none()
         }
-        Message::LicenseChecked(Ok(activation::Outcome::Valid { expiry_warning })) => {
-            state.status = expiry_warning;
+        Message::LicenseChecked(Ok(activation::Outcome::Valid { device_id, expiry_warning })) => {
+            state.device_id = device_id;
+            state.notice = expiry_warning.map(Notice::warning);
             let Some(pool) = state.pool.clone() else {
                 return Task::none();
             };
@@ -510,13 +561,14 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::batch([load_items(for_items), load_shop_profile(pool)])
         }
         Message::LicenseChecked(Ok(activation::Outcome::NeedsActivation { device_id, message })) => {
+            state.device_id = device_id.clone();
             state.activation.device_id = device_id;
             state.activation.error = message;
             state.stage = Stage::Activation;
             Task::none()
         }
         Message::LicenseChecked(Err(e)) => {
-            state.status = Some(format!("could not check license: {e}"));
+            state.notice = Some(Notice::error(format!("could not check license: {e}")));
             Task::none()
         }
         Message::ActivationKeyChanged(value) => {
@@ -537,6 +589,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::SubmitActivation => activation::submit(state),
         Message::ActivationCompleted(Ok(())) => {
             state.activation.error = None;
+            state.device_id = state.activation.device_id.clone();
             let Some(pool) = state.pool.clone() else {
                 return Task::none();
             };
@@ -560,7 +613,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ShopProfileLoaded(Err(e)) => {
-            state.status = Some(format!("could not load shop profile: {e}"));
+            state.notice = Some(Notice::error(format!("could not load shop profile: {e}")));
             Task::none()
         }
         Message::ItemsLoaded(Ok(items)) => {
@@ -571,7 +624,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             refresh_item_thumbnails(state)
         }
         Message::ItemsLoaded(Err(e)) => {
-            state.status = Some(format!("could not load items: {e}"));
+            state.notice = Some(Notice::error(format!("could not load items: {e}")));
             Task::none()
         }
         Message::ThumbnailLoaded(id, Some(bytes)) => {
@@ -594,8 +647,12 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::Lock => {
             state.stage = Stage::Login;
-            state.login_pin_input.clear();
-            state.login_error = None;
+            state.login.clear();
+            // Locking the counter means whoever walks up next shouldn't be
+            // able to Ctrl+Z their way back through the last operator's
+            // typing.
+            state.undo_stack.clear();
+            state.redo_stack.clear();
             Task::none()
         }
         Message::ShopTabSelected(tab) => {
@@ -656,18 +713,18 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::ItemImagePicked(Ok(Some(bytes))) => {
             const MAX_IMAGE_BYTES: usize = 5_000_000;
             if bytes.len() > MAX_IMAGE_BYTES {
-                state.status = Some("image is too large (max 5 MB)".into());
+                state.notice = Some(Notice::error("image is too large (max 5 MB)"));
             } else if image::load_from_memory(&bytes).is_err() {
-                state.status = Some("that file doesn't look like a valid image".into());
+                state.notice = Some(Notice::error("that file doesn't look like a valid image"));
             } else if let Some(form) = &mut state.item_form {
                 form.image = Some(bytes);
-                state.status = None;
+                state.notice = None;
             }
             Task::none()
         }
         Message::ItemImagePicked(Ok(None)) => Task::none(),
         Message::ItemImagePicked(Err(e)) => {
-            state.status = Some(format!("could not read image: {e}"));
+            state.notice = Some(Notice::error(format!("could not read image: {e}")));
             Task::none()
         }
         Message::RemoveItemImage => {
@@ -680,11 +737,11 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::ItemSaved(Ok(item)) => {
             state.item_thumbnails.remove(&item.id);
             state.item_form = None;
-            state.status = None;
+            state.notice = None;
             reload_items(state)
         }
         Message::ItemSaved(Err(e)) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
 
@@ -705,11 +762,11 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::ItemDeleted(Ok(id)) => {
             state.item_thumbnails.remove(&id);
-            state.status = None;
+            state.notice = None;
             reload_items(state)
         }
         Message::ItemDeleted(Err(e)) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
 
@@ -763,7 +820,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     qty: String::new(),
                     price: money::paise_to_input(item.buy_price_paise),
                 });
-                state.status = None;
+                state.notice = None;
             }
             Task::none()
         }
@@ -774,16 +831,16 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::SubmitPurchase => items::submit_purchase(state),
         Message::CancelPurchaseForm => {
             state.purchase_form = None;
-            state.status = None;
+            state.notice = None;
             Task::none()
         }
         Message::PurchaseRecorded(Ok(_)) => {
             state.purchase_form = None;
-            state.status = None;
+            state.notice = None;
             reload_items(state)
         }
         Message::PurchaseRecorded(Err(e)) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
 
@@ -794,7 +851,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::SubmitRegister => register::submit(state),
         Message::ShopRegistered(Ok(profile)) => {
             state.shop = Some(profile);
-            state.status = None;
+            state.notice = None;
             state.stage = Stage::Home;
             backup::maybe_auto_backup(state)
         }
@@ -803,34 +860,44 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ShopRegistered(Err(e)) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
 
+        // PIN and license-key fields deliberately bypass `push_edit`: the
+        // undo stack keeps every intermediate value of whatever it
+        // records, so routing a PIN through it would leave the PIN sitting
+        // in memory in plain text long after `LoginState::clear` wiped the
+        // field itself — which rather undoes the point of hashing it.
         Message::LoginPinChanged(value) => {
-            push_edit(state, EditableField::LoginPin, value);
+            state.login.pin_input = value;
             Task::none()
         }
-        Message::SubmitLogin => {
-            let expected = state.shop.as_ref().and_then(|s| s.pin.as_deref());
-            match expected {
-                None => {
-                    state.stage = Stage::Home;
-                    state.login_error = None;
-                    backup::maybe_auto_backup(state)
-                }
-                Some(pin) if pin == state.login_pin_input.trim() => {
-                    state.stage = Stage::Home;
-                    state.login_error = None;
-                    state.login_pin_input.clear();
-                    backup::maybe_auto_backup(state)
-                }
-                Some(_) => {
-                    state.login_error = Some("incorrect PIN".into());
-                    Task::none()
-                }
-            }
+        Message::SubmitLogin => login::submit(state),
+        Message::LoginVerified(result) => login::verified(state, result),
+        Message::ForgotPinPressed => {
+            state.login.reset_open = true;
+            state.login.reset_error = None;
+            state.login.error = None;
+            Task::none()
         }
+        Message::CancelPinReset => {
+            state.login.reset_open = false;
+            state.login.reset_key.clear();
+            state.login.reset_pin.clear();
+            state.login.reset_confirm.clear();
+            state.login.reset_error = None;
+            Task::none()
+        }
+        Message::PinResetFieldChanged(field, value) => {
+            state.login.set_field(field, value);
+            Task::none()
+        }
+        Message::SubmitPinReset => login::submit_reset(state),
+        Message::PinResetCompleted(result) => login::reset_completed(state, result),
+        // Nothing to do but re-render: the lockout countdown is derived
+        // from `pin_locked_until`, so a repaint is the whole point.
+        Message::Tick => Task::none(),
 
         Message::SaleItemSelected(option) => {
             sale::select_item(state, option);
@@ -842,119 +909,20 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::SubmitSale => sale::submit(state),
         Message::SaleRecorded(Ok(_)) => {
-            state.status = None;
+            state.notice = Some(Notice::success("Sale recorded."));
             state.sale_form = sale::SaleForm::default();
-            let Some(pool) = state.pool.clone() else {
-                return Task::none();
-            };
-            Task::batch([load_items(pool.clone()), sale::load_recent(pool)])
+            reload_items(state)
         }
         Message::SaleRecorded(Err(e)) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
-        Message::SaleHistoryLoaded(Ok(rows)) => {
-            state.recent_sales = rows;
-            state.sale_page = 0;
+        Message::LowStockPageNext => {
+            state.low_stock_page += 1;
             Task::none()
         }
-        Message::SaleHistoryLoaded(Err(e)) => {
-            state.status = Some(e);
-            Task::none()
-        }
-        Message::SalesPageNext => {
-            state.sale_page += 1;
-            Task::none()
-        }
-        Message::SalesPagePrev => {
-            state.sale_page = state.sale_page.saturating_sub(1);
-            Task::none()
-        }
-        Message::OpenSaleView(id) => {
-            let Some(pool) = state.pool.clone() else {
-                return Task::none();
-            };
-            Task::perform(
-                async move { crate::repo::get_sale(&pool, id).await },
-                |result| Message::SaleViewLoaded(result.map_err(|e| e.to_string())),
-            )
-        }
-        Message::SaleViewLoaded(Ok(sale)) => {
-            let item_id = sale.item_id;
-            state.sale_viewing = Some(sale);
-            fetch_thumbnails(state, vec![item_id])
-        }
-        Message::SaleViewLoaded(Err(e)) => {
-            state.status = Some(e);
-            Task::none()
-        }
-        Message::CloseSaleView => {
-            state.sale_viewing = None;
-            Task::none()
-        }
-        Message::OpenSaleEdit(id) => {
-            state.sale_viewing = None;
-            let Some(pool) = state.pool.clone() else {
-                return Task::none();
-            };
-            Task::perform(
-                async move { crate::repo::get_sale(&pool, id).await },
-                |result| Message::SaleEditLoaded(result.map_err(|e| e.to_string())),
-            )
-        }
-        Message::SaleEditLoaded(Ok(sale)) => {
-            sale::load_for_edit(state, sale);
-            Task::none()
-        }
-        Message::SaleEditLoaded(Err(e)) => {
-            state.status = Some(e);
-            Task::none()
-        }
-        Message::CancelSaleEdit => {
-            sale::cancel_edit(state);
-            Task::none()
-        }
-        Message::DeleteSalePressed(id) => {
-            if state.sale_confirming_delete_id == Some(id) {
-                state.sale_confirming_delete_id = None;
-                let Some(pool) = state.pool.clone() else {
-                    return Task::none();
-                };
-                Task::perform(
-                    async move { crate::repo::delete_sale(&pool, id).await.map(|_| id) },
-                    |result| Message::SaleDeleted(result.map_err(|e| e.to_string())),
-                )
-            } else {
-                state.sale_confirming_delete_id = Some(id);
-                Task::none()
-            }
-        }
-        Message::SaleDeleted(Ok(id)) => {
-            state.status = None;
-            if state.sale_form.editing_id == Some(id) {
-                sale::cancel_edit(state);
-            }
-            let Some(pool) = state.pool.clone() else {
-                return Task::none();
-            };
-            Task::batch([load_items(pool.clone()), sale::load_recent(pool)])
-        }
-        Message::SaleDeleted(Err(e)) => {
-            state.status = Some(e);
-            Task::none()
-        }
-        Message::PrintSalePressed(id) => sale::export_pdf(state, id, true),
-        Message::DownloadSalePressed(id) => sale::export_pdf(state, id, false),
-        Message::SalePdfReady(Ok((path, opened))) => {
-            state.status = Some(if opened {
-                format!("Sale receipt saved and opened: {}", path.display())
-            } else {
-                format!("Sale receipt saved: {}", path.display())
-            });
-            Task::none()
-        }
-        Message::SalePdfReady(Err(e)) => {
-            state.status = Some(e);
+        Message::LowStockPagePrev => {
+            state.low_stock_page = state.low_stock_page.saturating_sub(1);
             Task::none()
         }
 
@@ -974,6 +942,10 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             push_edit(state, EditableField::BillDiscount, value);
             Task::none()
         }
+        Message::BillCustomerChanged(value) => {
+            push_edit(state, EditableField::BillCustomer, value);
+            Task::none()
+        }
         Message::AddBillLine => {
             bills::add_line(state);
             Task::none()
@@ -984,7 +956,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::SubmitBill => bills::submit(state),
         Message::BillSaved(Ok(_)) => {
-            state.status = None;
+            state.notice = None;
             bills::start_new(state);
             let Some(pool) = state.pool.clone() else {
                 return Task::none();
@@ -992,7 +964,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::batch([load_items(pool.clone()), bills::load_history(pool, state.bills.page)])
         }
         Message::BillSaved(Err(e)) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
         Message::BillsLoaded(Ok((rows, total))) => {
@@ -1001,7 +973,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::BillsLoaded(Err(e)) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
         Message::BillsPageNext => {
@@ -1033,7 +1005,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             fetch_thumbnails(state, item_ids)
         }
         Message::BillViewLoaded(Err(e)) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
         Message::CloseBillView => {
@@ -1055,7 +1027,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::BillEditLoaded(Err(e)) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
         Message::CancelBillEdit => {
@@ -1078,23 +1050,23 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
         }
         Message::BillDeleted(Ok(_)) => {
-            state.status = None;
+            state.notice = None;
             let Some(pool) = state.pool.clone() else {
                 return Task::none();
             };
             bills::load_history(pool, state.bills.page)
         }
         Message::BillDeleted(Err(e)) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
         Message::PrintBillPressed(id) => bills::print_bill(state, id),
         Message::BillPdfReady(Ok(path)) => {
-            state.status = Some(format!("Bill saved and opened: {}", path.display()));
+            state.notice = Some(Notice::success(format!("Bill saved and opened: {}", path.display())));
             Task::none()
         }
         Message::BillPdfReady(Err(e)) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
 
@@ -1114,7 +1086,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ReportsLoaded(Err(e)) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
         Message::DownloadReportPressed => reports::download(state),
@@ -1122,11 +1094,11 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             state.reports.stock_value_paise = loaded.stock_value_paise;
             state.reports.total_profit_paise = loaded.total_profit_paise;
             state.reports.rows = loaded.rows;
-            state.status = Some(format!("Report saved and opened: {}", path.display()));
+            state.notice = Some(Notice::success(format!("Report saved and opened: {}", path.display())));
             Task::none()
         }
         Message::ReportPdfReady(Err(e)) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
 
@@ -1141,11 +1113,11 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::BackupCompleted(Ok(path)) => {
             state.settings.last_backup_date = Some(chrono::Utc::now().date_naive());
             let _ = crate::settings::save(&state.settings);
-            state.status = Some(format!("Backup saved: {}", path.display()));
+            state.notice = Some(Notice::success(format!("Backup saved: {}", path.display())));
             Task::none()
         }
         Message::BackupCompleted(Err(e)) => {
-            state.status = Some(format!("backup failed: {e}"));
+            state.notice = Some(Notice::error(format!("backup failed: {e}")));
             Task::none()
         }
 
@@ -1156,7 +1128,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             state.security_form = settings::SecurityForm::default();
             state.settings_tab = settings::SettingsTab::Profile;
             state.stage = Stage::Settings;
-            state.status = None;
+            state.notice = None;
             Task::none()
         }
         Message::SettingsTabSelected(tab) => {
@@ -1171,19 +1143,19 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::ProfileLogoPicked(Ok(Some(bytes))) => {
             const MAX_IMAGE_BYTES: usize = 5_000_000;
             if bytes.len() > MAX_IMAGE_BYTES {
-                state.status = Some("image is too large (max 5 MB)".into());
+                state.notice = Some(Notice::error("image is too large (max 5 MB)"));
             } else if image::load_from_memory(&bytes).is_err() {
-                state.status = Some("that file doesn't look like a valid image".into());
+                state.notice = Some(Notice::error("that file doesn't look like a valid image"));
             } else {
                 state.profile_form.logo = Some(bytes);
                 state.profile_form.logo_removed = false;
-                state.status = None;
+                state.notice = None;
             }
             Task::none()
         }
         Message::ProfileLogoPicked(Ok(None)) => Task::none(),
         Message::ProfileLogoPicked(Err(e)) => {
-            state.status = Some(format!("could not read image: {e}"));
+            state.notice = Some(Notice::error(format!("could not read image: {e}")));
             Task::none()
         }
         Message::RemoveProfileLogo => {
@@ -1194,7 +1166,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::SubmitProfile => settings::submit_profile(state),
         Message::ProfileSaved(Ok(profile)) => {
             state.shop = Some(profile);
-            state.status = None;
+            state.notice = Some(Notice::success("Shop profile saved."));
             let logo_changed = state.profile_form.logo.is_some() || state.profile_form.logo_removed;
             if logo_changed {
                 state.shop_logo = state.profile_form.logo.clone();
@@ -1202,24 +1174,26 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ProfileSaved(Err(e)) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
         Message::SecurityFieldChanged(field, value) => {
-            push_edit(state, EditableField::Security(field), value);
+            state.security_form.set_field(field, value);
             Task::none()
         }
         Message::SubmitPinChange => settings::submit_pin(state),
-        Message::PinChanged(Ok(new_pin)) => {
+        Message::PinChanged(Ok(new_hash)) => {
             if let Some(shop) = &mut state.shop {
-                shop.pin = new_pin;
+                shop.pin_hash = new_hash;
+                shop.pin_failed_attempts = 0;
+                shop.pin_locked_until = None;
             }
             state.security_form = settings::SecurityForm::default();
-            state.status = Some("security settings saved".into());
+            state.notice = Some(Notice::success("Security settings saved."));
             Task::none()
         }
         Message::PinChanged(Err(e)) => {
-            state.status = Some(e);
+            state.notice = Some(Notice::error(e));
             Task::none()
         }
     }
@@ -1230,7 +1204,9 @@ fn enter_shop_tab(state: &mut State, tab: ShopTab) -> Task<Message> {
         return Task::none();
     };
     match tab {
-        ShopTab::PurchasesAndSales => sale::load_recent(pool),
+        // Details shows low stock, which is derived from `items` — so it
+        // needs those fresh rather than a list of its own.
+        ShopTab::Details => load_items(pool),
         ShopTab::Billings => bills::load_history(pool, state.bills.page),
         ShopTab::Reports => reports::run(state),
     }
@@ -1245,7 +1221,13 @@ fn load_items(pool: SqlitePool) -> Task<Message> {
 
 fn load_shop_profile(pool: SqlitePool) -> Task<Message> {
     Task::perform(
-        async move { crate::repo::get_shop_profile(&pool).await },
+        async move {
+            // Re-hash any PIN left in plain text by a pre-0009 install
+            // before the profile is read, so the screen never sees the
+            // half-migrated row. A no-op on every launch after the first.
+            crate::repo::upgrade_legacy_pin(&pool).await?;
+            crate::repo::get_shop_profile(&pool).await
+        },
         |result| Message::ShopProfileLoaded(result.map_err(|e| e.to_string())),
     )
 }
@@ -1297,12 +1279,7 @@ fn fetch_thumbnails(state: &State, ids: Vec<i64>) -> Task<Message> {
 
 fn view(state: &State) -> Element<'_, Message> {
     let content: Element<'_, Message> = match state.stage {
-        Stage::Loading => container(text("Loading...").size(18))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(iced::Alignment::Center)
-            .align_y(iced::Alignment::Center)
-            .into(),
+        Stage::Loading => loading_view(),
         Stage::Activation => activation::view(state),
         Stage::Register => register::view(state),
         Stage::Login => login::view(state),
@@ -1324,14 +1301,56 @@ fn view(state: &State) -> Element<'_, Message> {
             .into(),
     };
 
-    let status_bar: Element<'_, Message> = match &state.status {
-        Some(message) => container(text(message).color(iced::Color::from_rgb(0.83, 0.16, 0.16)))
-            .padding(8)
-            .into(),
-        None => container(text("")).into(),
+    let mut screen = column![container(content).width(Length::Fill).height(Length::Fill)];
+    if let Some(notice) = &state.notice {
+        screen = screen.push(status_bar(notice));
+    }
+
+    screen.width(Length::Fill).height(Length::Fill).into()
+}
+
+fn loading_view() -> Element<'static, Message> {
+    container(
+        column![
+            svg(logo_handle()).width(64).height(64),
+            text("Loading...").size(theme::TEXT_BODY).color(theme::MUTED_TEXT),
+        ]
+        .spacing(theme::SPACE_MD)
+        .align_x(iced::Alignment::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(iced::Alignment::Center)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+/// The bottom status strip. It only takes up space when there's something
+/// to say, and it's tinted by severity — a saved backup shouldn't look
+/// like a failure, which is exactly how it used to read.
+fn status_bar(notice: &Notice) -> Element<'_, Message> {
+    let (style, icon): (fn(&iced::Theme) -> iced::widget::container::Style, &str) = match notice.kind {
+        NoticeKind::Error => (theme::notice_error, "!"),
+        NoticeKind::Success => (theme::notice_success, "\u{2713}"),
+        NoticeKind::Warning => (theme::notice_warning, "!"),
     };
 
-    column![content, status_bar].width(Length::Fill).height(Length::Fill).into()
+    container(
+        container(
+            row![
+                text(icon).size(theme::TEXT_BODY).font(theme::BOLD),
+                text(&notice.text).size(theme::TEXT_SMALL),
+            ]
+            .spacing(theme::SPACE_SM)
+            .align_y(iced::Alignment::Center),
+        )
+        .style(style)
+        .padding([theme::SPACE_SM as u16, theme::SPACE_MD as u16])
+        .width(Length::Fill),
+    )
+    .padding([theme::SPACE_SM as u16, theme::SPACE_MD as u16])
+    .width(Length::Fill)
+    .into()
 }
 
 fn app_bar(state: &State, show_home: bool) -> Element<'_, Message> {
@@ -1345,66 +1364,71 @@ fn app_bar(state: &State, show_home: bool) -> Element<'_, Message> {
 
     let logo: Element<'_, Message> = match &state.shop_logo {
         Some(bytes) => iced::widget::image::Image::new(iced::widget::image::Handle::from_bytes(bytes.clone()))
-            .width(32)
-            .height(32)
+            .width(34)
+            .height(34)
             .content_fit(iced::ContentFit::Cover)
             .into(),
-        None => svg(logo_handle()).width(32).height(32).into(),
+        None => svg(logo_handle()).width(34).height(34).into(),
     };
 
-    let mut left = row![logo, text(shop_name).size(18)]
-        .spacing(theme::SPACE_SM)
-        .align_y(iced::Alignment::Center);
-
+    // Shop name and the current screen stack vertically: the name is the
+    // constant, the screen is what changes, and reading them as two lines
+    // is faster than parsing "Shop Name · Inventory" on one.
+    let mut identity = column![text(shop_name).size(theme::TEXT_HEADING).font(theme::SEMIBOLD)].spacing(1);
     if !title.is_empty() {
-        left = left.push(text(format!("· {title}")).size(16));
+        identity = identity.push(text(title).size(theme::TEXT_CAPTION).color(Color::from_rgba(1.0, 1.0, 1.0, 0.78)));
     }
 
     let mut right = row![].spacing(theme::SPACE_SM);
     if show_home {
-        right = right.push(button(text("Home").size(14)).style(theme::secondary_button).padding([8, 14]).on_press(Message::GoHome));
+        right = right.push(app_bar_action("Home", Message::GoHome));
     }
-    right = right.push(button(text("Settings").size(14)).style(theme::secondary_button).padding([8, 14]).on_press(Message::OpenSettings));
-    right = right.push(button(text("Lock").size(14)).style(theme::secondary_button).padding([8, 14]).on_press(Message::Lock));
+    right = right.push(app_bar_action("Settings", Message::OpenSettings));
+    right = right.push(app_bar_action("Lock", Message::Lock));
 
     container(
-        row![left, iced::widget::space::horizontal(), right]
-            .align_y(iced::Alignment::Center)
-            .padding(12),
+        row![
+            row![logo, identity].spacing(theme::SPACE_SM).align_y(iced::Alignment::Center),
+            iced::widget::space::horizontal(),
+            right,
+        ]
+        .align_y(iced::Alignment::Center)
+        .padding([theme::SPACE_SM as u16 + 2, theme::SPACE_MD as u16]),
     )
     .style(theme::header_bar)
     .width(Length::Fill)
     .into()
 }
 
+fn app_bar_action(label: &str, message: Message) -> Element<'static, Message> {
+    button(text(label.to_string()).size(theme::TEXT_SMALL))
+        .style(theme::app_bar_button)
+        .padding([8, 16])
+        .on_press(message)
+        .into()
+}
+
 fn shop_tabs(state: &State) -> Element<'_, Message> {
-    row![
-        tab_button("Sales", ShopTab::PurchasesAndSales, state.shop_tab, Message::ShopTabSelected),
+    tab_strip(row![
+        tab_button("Details", ShopTab::Details, state.shop_tab, Message::ShopTabSelected),
         tab_button("Billings", ShopTab::Billings, state.shop_tab, Message::ShopTabSelected),
-        iced::widget::space::horizontal(),
         tab_button("Reports", ShopTab::Reports, state.shop_tab, Message::ShopTabSelected),
-    ]
-    .spacing(8)
-    .padding(12)
-    .into()
+    ])
 }
 
 fn shop_content(state: &State) -> Element<'_, Message> {
     match state.shop_tab {
-        ShopTab::PurchasesAndSales => sale::view(state),
+        ShopTab::Details => sale::view(state),
         ShopTab::Billings => bills::view(state),
         ShopTab::Reports => reports::view(state),
     }
 }
 
 fn inventory_tabs(state: &State) -> Element<'_, Message> {
-    row![
+    tab_strip(row![
         tab_button("Items", InventoryTab::Items, state.inventory_tab, Message::InventoryTabSelected),
         tab_button("Backup", InventoryTab::Backup, state.inventory_tab, Message::InventoryTabSelected),
-    ]
-    .spacing(8)
-    .padding(12)
-    .into()
+    ])
 }
 
 fn inventory_content(state: &State) -> Element<'_, Message> {
@@ -1414,17 +1438,29 @@ fn inventory_content(state: &State) -> Element<'_, Message> {
     }
 }
 
+/// Wraps a row of tab buttons in the pill that makes them read as one
+/// segmented control instead of several unrelated buttons.
+fn tab_strip<'a>(tabs: iced::widget::Row<'a, Message>) -> Element<'a, Message> {
+    container(
+        container(tabs.spacing(theme::SPACE_XS)).style(theme::panel).padding(theme::SPACE_XS as u16),
+    )
+    .padding([theme::SPACE_MD as u16, theme::SPACE_MD as u16])
+    .into()
+}
+
 fn tab_button<T: Copy + PartialEq>(
     label: &str,
     target: T,
     current: T,
     on_select: impl Fn(T) -> Message,
 ) -> Element<'static, Message> {
-    let btn = button(text(label.to_string())).on_press(on_select(target));
+    let btn = button(text(label.to_string()).size(theme::TEXT_SMALL).font(theme::SEMIBOLD))
+        .padding([9, 20])
+        .on_press(on_select(target));
     if target == current {
-        btn.style(theme::primary_button).into()
+        btn.style(theme::tab_selected).into()
     } else {
-        btn.style(theme::secondary_button).into()
+        btn.style(theme::tab_idle).into()
     }
 }
 

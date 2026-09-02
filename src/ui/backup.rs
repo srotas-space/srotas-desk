@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, text};
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length, Task};
 use sqlx::SqlitePool;
 use std::path::PathBuf;
@@ -65,19 +65,42 @@ pub fn view(state: &State) -> Element<'_, Message> {
         .unwrap_or_else(|| "No backup taken yet".to_string());
 
     let body = column![
-        text("Backup").size(22),
-        text("Copy the shop database to a pendrive or a folder that syncs to Google Drive. \
-              Do this regularly — this is the only protection against losing all data if this computer's disk fails.").size(13),
-        container(column![text("Backup folder").size(13), text(folder_label).size(15)].spacing(4))
-            .style(theme::card)
-            .padding(theme::SPACE_MD),
-        iced::widget::row![
-            button(text("Choose Folder").size(15)).style(theme::secondary_button).padding([10, 20]).on_press(Message::ChooseBackupFolder),
-            button(text("Backup Now").size(15)).style(theme::primary_button).padding([10, 20]).on_press(Message::BackupNowPressed),
+        column![
+            text("Backup").size(theme::TEXT_TITLE).font(theme::SEMIBOLD),
+            text(
+                "Copy the shop database to a pendrive or a folder that syncs to Google Drive. \
+                 This is the only thing standing between you and losing every record if this \
+                 computer's disk fails."
+            )
+            .size(theme::TEXT_SMALL)
+            .color(theme::MUTED_TEXT),
         ]
-        .spacing(theme::SPACE_MD),
-        text(last_backup_label).size(13),
-        text("A backup also runs automatically once a day, the first time you open the app, once a folder is chosen.").size(12),
+        .spacing(theme::SPACE_XS),
+        container(
+            column![
+                text("Backup folder").size(theme::TEXT_CAPTION).color(theme::MUTED_TEXT),
+                text(folder_label).size(theme::TEXT_BODY),
+                text(last_backup_label).size(theme::TEXT_SMALL).color(theme::MUTED_TEXT),
+            ]
+            .spacing(theme::SPACE_XS)
+        )
+        .style(theme::panel)
+        .padding(theme::SPACE_MD)
+        .width(Length::Fill),
+        row![
+            button(text("Choose Folder").size(theme::TEXT_BODY))
+                .style(theme::secondary_button)
+                .padding(theme::CONTROL_PADDING)
+                .on_press(Message::ChooseBackupFolder),
+            button(text("Backup Now").size(theme::TEXT_BODY).font(theme::SEMIBOLD))
+                .style(theme::primary_button)
+                .padding(theme::CONTROL_PADDING)
+                .on_press(Message::BackupNowPressed),
+        ]
+        .spacing(theme::SPACE_SM),
+        text("Once a folder is chosen, a backup also runs by itself the first time you open the app each day.")
+            .size(theme::TEXT_CAPTION)
+            .color(theme::MUTED_TEXT),
     ]
     .spacing(theme::SPACE_MD)
     .max_width(560);
@@ -85,6 +108,6 @@ pub fn view(state: &State) -> Element<'_, Message> {
     container(container(body).style(theme::card).padding(theme::SPACE_LG))
         .width(Length::Fill)
         .height(Length::Fill)
-        .padding(theme::SPACE_MD)
+        .padding([0, theme::SPACE_MD as u16])
         .into()
 }

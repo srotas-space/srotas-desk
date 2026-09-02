@@ -1,12 +1,20 @@
-use iced::widget::{button, column, combo_box, container, row, scrollable, text, text_input};
+//! The Shop → Details screen: pick an item, see what the shop knows about
+//! it, and sell stock off it.
+//!
+//! Selling used to sit above a Sales History list, which is where a sale's
+//! view/edit/print/delete actions lived. That list is gone; the space now
+//! carries the low-stock items, which is the thing a shopkeeper standing
+//! at the counter can actually act on. Past sales still exist as
+//! transactions and still show up in Reports — bills (Shop → Billings) are
+//! the printable record.
+use iced::widget::{button, column, combo_box, container, row, scrollable, text};
 use iced::{Element, Length, Task};
-use std::path::PathBuf;
 
-use super::{Message, State};
+use super::{Message, Notice, State};
+use crate::models::Item;
 use crate::money;
-use crate::repo::TransactionHistoryRow;
 use crate::ui::common::ItemOption;
-use crate::ui::theme;
+use crate::ui::{common, theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
@@ -16,7 +24,6 @@ pub enum Field {
 
 #[derive(Debug, Clone, Default)]
 pub struct SaleForm {
-    pub editing_id: Option<i64>,
     pub item: Option<ItemOption>,
     pub qty: String,
     pub price: String,
@@ -45,201 +52,195 @@ pub fn select_item(state: &mut State, option: ItemOption) {
     state.sale_form.item = Some(option);
 }
 
-/// Loads a past sale into the form for editing — pre-fills item/qty/price
-/// and switches Submit over to `edit_sale`.
-pub fn load_for_edit(state: &mut State, row: TransactionHistoryRow) {
-    state.sale_form.editing_id = Some(row.id);
-    state.sale_form.item = Some(ItemOption { id: row.item_id, name: row.item_name });
-    state.sale_form.qty = format!("{}", row.qty);
-    state.sale_form.price = money::paise_to_input(row.price_paise);
-    state.sale_viewing = None;
-}
-
-pub fn cancel_edit(state: &mut State) {
-    state.sale_form = SaleForm::default();
-    state.status = None;
-}
-
 pub fn submit(state: &mut State) -> Task<Message> {
     let form = &state.sale_form;
     let Some(item) = form.item.clone() else {
-        state.status = Some("choose an item first".into());
+        state.notice = Some(Notice::error("choose an item first"));
         return Task::none();
     };
     let Some(qty) = form.qty.trim().parse::<f64>().ok().filter(|q| *q > 0.0) else {
-        state.status = Some("quantity must be a positive number".into());
+        state.notice = Some(Notice::error("quantity must be a positive number"));
         return Task::none();
     };
     let Some(price_paise) = money::rupees_to_paise(&form.price) else {
-        state.status = Some("sell price must be a valid amount, e.g. 120.00".into());
+        state.notice = Some(Notice::error("sell price must be a valid amount, e.g. 120.00"));
         return Task::none();
     };
     let Some(pool) = state.pool.clone() else {
         return Task::none();
     };
-    let editing_id = form.editing_id;
 
     Task::perform(
-        async move {
-            match editing_id {
-                Some(id) => crate::repo::edit_sale(&pool, id, item.id, qty, price_paise).await,
-                None => crate::repo::record_sale(&pool, item.id, qty, price_paise, chrono::Utc::now()).await,
-            }
-        },
+        async move { crate::repo::record_sale(&pool, item.id, qty, price_paise, chrono::Utc::now()).await },
         |result| Message::SaleRecorded(result.map_err(|e| e.to_string())),
     )
 }
 
 pub const PAGE_SIZE: usize = 10;
 
-pub fn load_recent(pool: sqlx::SqlitePool) -> Task<Message> {
-    Task::perform(
-        async move { crate::repo::transaction_history(&pool, Some("sell"), None, None, None, Some(200)).await },
-        |result| Message::SaleHistoryLoaded(result.map_err(|e| e.to_string())),
-    )
+/// The low-stock items on the current page, plus that page's (clamped)
+/// index and the total number of pages. Clamping here rather than at the
+/// message handlers means restocking the last item on the last page can't
+/// strand the screen on a page that no longer exists.
+pub fn low_stock_page(state: &State) -> (Vec<&Item>, usize, usize) {
+    let matches: Vec<&Item> = state.items.iter().filter(|item| item.is_low_stock()).collect();
+
+    let page_count = matches.len().div_ceil(PAGE_SIZE).max(1);
+    let page = state.low_stock_page.min(page_count - 1);
+    let visible = matches.into_iter().skip(page * PAGE_SIZE).take(PAGE_SIZE).collect();
+
+    (visible, page, page_count)
 }
 
-/// Re-fetches the sale fresh rather than trusting whatever's on screen —
-/// same reasoning as the Reports/Bills PDF export. `open_after` controls
-/// whether this is "Print" (opens the file, ready to print) or "Download"
-/// (just saves it and reports where).
-pub fn export_pdf(state: &State, id: i64, open_after: bool) -> Task<Message> {
-    let Some(pool) = state.pool.clone() else {
-        return Task::done(Message::SalePdfReady(Err("database is not ready yet".into())));
-    };
-    let shop_name = state.shop.as_ref().map(|s| s.shop_name.clone()).unwrap_or_else(|| "Srotas Desk".to_string());
-
-    Task::perform(
-        async move {
-            let sale = crate::repo::get_sale(&pool, id).await.map_err(|e| e.to_string())?;
-            let bytes = build_pdf_bytes(&shop_name, &sale)?;
-            save(bytes, sale.id, open_after).await
-        },
-        move |result| Message::SalePdfReady(result.map(|path| (path, open_after))),
-    )
-}
-
-async fn save(bytes: Vec<u8>, id: i64, open_after: bool) -> Result<PathBuf, String> {
-    let dir = dirs::download_dir().or_else(dirs::document_dir).ok_or("could not find a Downloads folder on this computer")?;
-    let path = dir.join(format!("srotas-sale-{id}.pdf"));
-
-    tokio::fs::write(&path, &bytes).await.map_err(|e| e.to_string())?;
-    if open_after {
-        open::that(&path).map_err(|e| format!("sale receipt saved, but couldn't open it: {e}"))?;
-    }
-
-    Ok(path)
-}
-
-fn build_pdf_bytes(shop_name: &str, sale: &TransactionHistoryRow) -> Result<Vec<u8>, String> {
-    let mut w = crate::pdf::Writer::new(&format!("{shop_name} - Sale #{}", sale.id))?;
-
-    w.line(shop_name, 18.0, true);
-    w.line(&format!("Sale #{}", sale.id), 14.0, true);
-    w.line(&format!("Date: {}", sale.timestamp.format("%d %b %Y %H:%M")), 10.0, false);
-    w.gap(6.0);
-
-    const ITEM_X: f32 = crate::pdf::LEFT_MM;
-    const QTY_X: f32 = 100.0;
-    const PRICE_X: f32 = 130.0;
-    const TOTAL_X: f32 = 160.0;
-
-    w.row(&[("Item", ITEM_X), ("Qty", QTY_X), ("Price", PRICE_X), ("Total", TOTAL_X)], 10.0, true);
-
-    let total_paise = (sale.price_paise as f64 * sale.qty).round() as i64;
-    w.row(
-        &[
-            (sale.item_name.as_str(), ITEM_X),
-            (&format!("{:.1}", sale.qty), QTY_X),
-            (&money::format_paise_ascii(sale.price_paise), PRICE_X),
-            (&money::format_paise_ascii(total_paise), TOTAL_X),
-        ],
-        10.0,
-        false,
-    );
-    w.gap(6.0);
-    w.line(&format!("Total: {}", money::format_paise_ascii(total_paise)), 14.0, true);
-
-    w.finish()
-}
+// ----------------------------------------------------------------- view
 
 pub fn view(state: &State) -> Element<'_, Message> {
-    if let Some(sale) = &state.sale_viewing {
-        return detail_view(state, sale);
-    }
-
-    let form = &state.sale_form;
-
-    let selected_item = form.item.as_ref().and_then(|sel| state.items.iter().find(|i| i.id == sel.id));
-
-    let item_picker = combo_box(
-        &state.sale_item_combo,
-        "Search item...",
-        form.item.as_ref(),
-        Message::SaleItemSelected,
-    )
-    .padding(10)
-    .width(Length::Fixed(260.0));
-
-    let title = match form.editing_id {
-        Some(id) => format!("Edit Sale #{id}"),
-        None => "Item (Billing)".to_string(),
-    };
-
-    let mut actions = row![
-        labeled("Item", item_picker),
-        labeled("Quantity", text_input("e.g. 2", &form.qty).on_input(|v| Message::SaleFieldChanged(Field::Qty, v)).padding(10).width(Length::Fixed(120.0))),
-        labeled("Sell Price (₹) per unit", text_input("120.00", &form.price).on_input(|v| Message::SaleFieldChanged(Field::Price, v)).padding(10).width(Length::Fixed(140.0))),
-        button(text(if form.editing_id.is_some() { "Save" } else { "Sell Stock" }).size(15)).style(theme::accent_button).padding([10, 24]).on_press(Message::SubmitSale),
+    column![
+        text("Item Details").size(theme::TEXT_TITLE).font(theme::SEMIBOLD),
+        items_panel(state),
+        details_panel(state),
+        low_stock_panel(state),
     ]
     .spacing(theme::SPACE_MD)
-    .align_y(iced::Alignment::End);
-    if form.editing_id.is_some() {
-        actions = actions.push(button(text("Cancel").size(15)).style(theme::secondary_button).padding([10, 24]).on_press(Message::CancelSaleEdit));
-    } else {
-        actions = actions.push(button(text("Billings").size(15)).style(theme::secondary_button).padding([10, 24]).on_press(Message::ShopTabSelected(super::ShopTab::Billings)));
-    }
+    // No top padding — the tab strip above already provides it. The
+    // bottom padding keeps the low-stock panel, which stretches to fill,
+    // off the window edge.
+    .padding(iced::Padding { top: 0.0, right: theme::SPACE_MD, bottom: theme::SPACE_MD, left: theme::SPACE_MD })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
 
-    let form_fields = column![text(title).size(20), actions].spacing(theme::SPACE_SM);
+/// What you're selling. The two actions sit on the same row as the three
+/// fields, bottom-aligned with them, so the whole thing reads as one line
+/// of work: pick, quantify, price, sell.
+fn items_panel(state: &State) -> Element<'_, Message> {
+    let form = &state.sale_form;
 
-    // Always visible — defaults to zero until an item is picked, then
-    // reflects that item's real stock/buy/sell figures.
-    let (stock_value, buy_value, sell_value) = match selected_item {
+    let item_picker = combo_box(&state.sale_item_combo, "Search item...", form.item.as_ref(), Message::SaleItemSelected)
+        .padding(theme::FIELD_PADDING)
+        .width(Length::Fill);
+
+    let body = column![
+        text("Items").size(theme::TEXT_HEADING).font(theme::SEMIBOLD),
+        row![
+            labeled("Item", item_picker).width(Length::FillPortion(3)),
+            labeled(
+                "Quantity",
+                common::field("e.g. 2", &form.qty).on_input(|v| Message::SaleFieldChanged(Field::Qty, v)),
+            )
+            .width(Length::FillPortion(2)),
+            labeled(
+                "Sell price (₹) per unit",
+                common::field("120.00", &form.price).on_input(|v| Message::SaleFieldChanged(Field::Price, v)),
+            )
+            .width(Length::FillPortion(2)),
+            button(text("Sell").size(theme::TEXT_BODY).font(theme::SEMIBOLD))
+                .style(theme::accent_button)
+                .padding(theme::CONTROL_PADDING)
+                .on_press(Message::SubmitSale),
+            button(text("Billings").size(theme::TEXT_BODY))
+                .style(theme::secondary_button)
+                .padding(theme::CONTROL_PADDING)
+                .on_press(Message::ShopTabSelected(super::ShopTab::Billings)),
+        ]
+        .spacing(theme::SPACE_MD)
+        // Bottom-aligned, so the buttons line up with the foot of the
+        // fields rather than floating against their labels.
+        .align_y(iced::Alignment::End),
+    ]
+    .spacing(theme::SPACE_MD);
+
+    container(body).style(theme::card).padding(theme::SPACE_MD).width(Length::Fill).into()
+}
+
+/// What the shop knows about the picked item, as three figures big enough
+/// to read from across the counter.
+fn details_panel(state: &State) -> Element<'_, Message> {
+    let selected_item =
+        state.sale_form.item.as_ref().and_then(|sel| state.items.iter().find(|i| i.id == sel.id));
+
+    // Always visible — zeroed until an item is picked, then reflecting
+    // that item's real stock/buy/sell figures.
+    let (stock_value, buy_value, sell_value, location_value) = match selected_item {
         Some(item) => (
             format!("{:.1} {}", item.stock_qty, item.unit),
             money::format_paise(item.buy_price_paise),
             money::format_paise(item.sell_price_paise),
+            if item.location.is_empty() { "Not recorded".to_string() } else { item.location.clone() },
         ),
-        None => ("0.0".to_string(), money::format_paise(0), money::format_paise(0)),
+        None => ("0.0".to_string(), money::format_paise(0), money::format_paise(0), "—".to_string()),
     };
 
-    let stats_panel = row![
-        stat("Stock", stock_value),
-        stat("Buy", buy_value),
-        stat("Sell", sell_value),
+    let mut heading = row![text("Details").size(theme::TEXT_HEADING).font(theme::SEMIBOLD)]
+        .spacing(theme::SPACE_SM)
+        .align_y(iced::Alignment::Center);
+    if let Some(item) = selected_item {
+        heading = heading.push(text("·").size(theme::TEXT_HEADING).color(theme::MUTED_TEXT));
+        heading = heading.push(text(&item.name).size(theme::TEXT_BODY).color(theme::MUTED_TEXT));
+    }
+
+    let status: Element<'_, Message> = match selected_item {
+        Some(item) if item.is_low_stock() => container(
+            text(format!("Below the low-stock threshold of {:.1} {}", item.low_stock_threshold, item.unit))
+                .size(theme::TEXT_SMALL)
+                .font(theme::SEMIBOLD),
+        )
+        .style(theme::low_stock_badge)
+        .padding([theme::SPACE_XS as u16 + 2, theme::SPACE_MD as u16])
+        .into(),
+        Some(item) => text(format!(
+            "Stock is healthy — above the low-stock threshold of {:.1} {}.",
+            item.low_stock_threshold, item.unit
+        ))
+        .size(theme::TEXT_SMALL)
+        .color(theme::MUTED_TEXT)
+        .into(),
+        None => text("Pick an item above to see its stock and prices.")
+            .size(theme::TEXT_SMALL)
+            .color(theme::MUTED_TEXT)
+            .into(),
+    };
+
+    let body = column![
+        heading,
+        row![
+            stat("Stock", stock_value),
+            stat("Buy price", buy_value),
+            stat("Sell price", sell_value),
+            // Where to walk to. Set in Inventory; the tile reads "Not
+            // recorded" until somebody fills it in.
+            stat_text("Kept at", location_value),
+        ]
+        .spacing(theme::SPACE_MD)
+        .width(Length::Fill),
+        status,
     ]
-    .spacing(theme::SPACE_LG);
+    .spacing(theme::SPACE_MD);
 
-    let entry = row![
-        container(form_fields).style(theme::card).padding(theme::SPACE_MD).width(Length::FillPortion(3)),
-        container(stats_panel).style(theme::card).padding(theme::SPACE_MD).width(Length::FillPortion(2)),
-    ]
-    .spacing(theme::SPACE_MD)
-    .align_y(iced::Alignment::Center);
+    container(body).style(theme::card).padding(theme::SPACE_MD).width(Length::Fill).into()
+}
 
-    let total = state.recent_sales.len();
-    let page_count = total.div_ceil(PAGE_SIZE).max(1);
-    let page = state.sale_page.min(page_count - 1);
-    let start = page * PAGE_SIZE;
+/// Everything the shop is about to run out of. Takes the rest of the
+/// window, so the page fills its height rather than trailing off into
+/// empty space the way the old Sales History did.
+fn low_stock_panel(state: &State) -> Element<'_, Message> {
+    let (visible, page, page_count) = low_stock_page(state);
+    let total = state.items.iter().filter(|item| item.is_low_stock()).count();
 
-    let mut history = column![text("Sales History").size(16)].spacing(6);
+    let mut list = column![].spacing(theme::SPACE_XS);
     if total == 0 {
-        history = history.push(text("No sales recorded yet.").size(13));
+        list = list.push(
+            text("Nothing is running low — every item is above its threshold.")
+                .size(theme::TEXT_SMALL)
+                .color(theme::MUTED_TEXT),
+        );
     }
-    for row in state.recent_sales.iter().skip(start).take(PAGE_SIZE) {
-        history = history.push(history_row(row, state.sale_confirming_delete_id == Some(row.id)));
+    for item in visible {
+        list = list.push(low_stock_row(item));
     }
 
+    let start = page * PAGE_SIZE;
     let range_label = if total == 0 {
         "0 of 0".to_string()
     } else {
@@ -247,115 +248,175 @@ pub fn view(state: &State) -> Element<'_, Message> {
     };
 
     let pagination = row![
-        text(range_label).size(13),
+        text(range_label).size(theme::TEXT_SMALL).color(theme::MUTED_TEXT),
         iced::widget::space::horizontal(),
-        button(text("Prev").size(14)).style(theme::secondary_button).padding([8, 16]).on_press_maybe((page > 0).then_some(Message::SalesPagePrev)),
-        text(format!("Page {} of {}", page + 1, page_count)).size(13),
-        button(text("Next").size(14)).style(theme::secondary_button).padding([8, 16]).on_press_maybe((page + 1 < page_count).then_some(Message::SalesPageNext)),
+        button(text("Prev").size(theme::TEXT_SMALL))
+            .style(theme::secondary_button)
+            .padding([8, 16])
+            .on_press_maybe((page > 0).then_some(Message::LowStockPagePrev)),
+        text(format!("Page {} of {}", page + 1, page_count)).size(theme::TEXT_SMALL).color(theme::MUTED_TEXT),
+        button(text("Next").size(theme::TEXT_SMALL))
+            .style(theme::secondary_button)
+            .padding([8, 16])
+            .on_press_maybe((page + 1 < page_count).then_some(Message::LowStockPageNext)),
     ]
-    .spacing(theme::SPACE_MD)
+    .spacing(theme::SPACE_SM)
     .align_y(iced::Alignment::Center);
 
-    scrollable(
+    let header = row![
+        text("Low Stock Items").size(theme::TEXT_HEADING).font(theme::SEMIBOLD),
+        iced::widget::space::horizontal(),
+        button(text("Go to Inventory").size(theme::TEXT_SMALL))
+            .style(theme::secondary_button)
+            .padding([8, 16])
+            .on_press(Message::GoToInventory),
+    ]
+    .align_y(iced::Alignment::Center);
+
+    container(
         column![
-            entry,
-            container(history).style(theme::card).padding(theme::SPACE_MD),
+            header,
+            // The list scrolls inside the panel so the pagination row stays
+            // pinned to the bottom instead of sliding off the page.
+            scrollable(list).height(Length::Fill),
             pagination,
         ]
-        .spacing(theme::SPACE_MD)
-        .padding(theme::SPACE_MD),
+        .spacing(theme::SPACE_MD),
     )
+    .style(theme::card)
+    .padding(theme::SPACE_MD)
+    .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
 
-fn stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
-    column![
-        text(label.to_uppercase()).size(12).color(theme::MUTED_TEXT),
-        text(value).size(20).font(theme::BOLD).color(theme::VIOLET),
-    ]
-    .spacing(4)
-    .into()
-}
-
-fn history_row(row: &TransactionHistoryRow, confirming_delete: bool) -> Element<'_, Message> {
-    let delete_label = if confirming_delete { "Confirm?" } else { "Delete" };
-
+fn low_stock_row(item: &Item) -> Element<'_, Message> {
     container(
-        iced::widget::row![
-            text(&row.item_name).width(Length::FillPortion(3)),
-            text(format!("{:.1}", row.qty)).width(Length::FillPortion(1)),
-            text(money::format_paise(row.price_paise)).width(Length::FillPortion(1)),
-            text(row.timestamp.format("%d %b %H:%M").to_string()).width(Length::FillPortion(2)),
-            row![
-                button(text("View").size(12)).style(theme::secondary_button).padding([6, 10]).on_press(Message::OpenSaleView(row.id)),
-                button(text("Edit").size(12)).style(theme::secondary_button).padding([6, 10]).on_press(Message::OpenSaleEdit(row.id)),
-                button(text("Print").size(12)).style(theme::secondary_button).padding([6, 10]).on_press(Message::PrintSalePressed(row.id)),
-                button(text("Download").size(12)).style(theme::secondary_button).padding([6, 10]).on_press(Message::DownloadSalePressed(row.id)),
-                button(text(delete_label).size(12)).style(theme::danger_button).padding([6, 10]).on_press(Message::DeleteSalePressed(row.id)),
-            ]
-            .spacing(6)
-            .width(Length::FillPortion(5)),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center),
-    )
-    .padding(6)
-    .into()
-}
-
-const THUMBNAIL_SIZE: f32 = 48.0;
-
-fn detail_view<'a>(state: &'a State, sale: &'a TransactionHistoryRow) -> Element<'a, Message> {
-    let total_paise = (sale.price_paise as f64 * sale.qty).round() as i64;
-
-    let item_row: Element<'_, Message> = match state.item_thumbnails.get(&sale.item_id) {
-        Some(bytes) => row![
-            iced::widget::image::Image::new(iced::widget::image::Handle::from_bytes(bytes.clone()))
-                .width(THUMBNAIL_SIZE)
-                .height(THUMBNAIL_SIZE)
-                .content_fit(iced::ContentFit::Cover),
-            detail_row("Item", sale.item_name.clone()),
+        row![
+            text(&item.name).size(theme::TEXT_BODY).width(Length::FillPortion(4)),
+            text(format!("{:.1} {} left", item.stock_qty, item.unit))
+                .size(theme::TEXT_SMALL)
+                .width(Length::FillPortion(2)),
+            text(format!("threshold {:.1}", item.low_stock_threshold))
+                .size(theme::TEXT_SMALL)
+                .color(theme::MUTED_TEXT)
+                .width(Length::FillPortion(2)),
+            text(money::format_paise(item.sell_price_paise)).size(theme::TEXT_SMALL).width(Length::FillPortion(2)),
+            container(text("LOW").size(theme::TEXT_CAPTION).font(theme::SEMIBOLD))
+                .style(theme::low_stock_badge)
+                .padding([theme::SPACE_XS as u16, theme::SPACE_SM as u16 + 2]),
         ]
         .spacing(theme::SPACE_SM)
-        .align_y(iced::Alignment::Center)
-        .into(),
-        None => detail_row("Item", sale.item_name.clone()),
-    };
+        .align_y(iced::Alignment::Center),
+    )
+    .style(theme::panel)
+    .padding(theme::SPACE_SM)
+    .width(Length::Fill)
+    .into()
+}
 
-    let body = column![
-        text(format!("Sale #{}", sale.id)).size(22),
-        text(sale.timestamp.format("%d %b %Y %H:%M").to_string()).size(13).color(theme::MUTED_TEXT),
-        item_row,
-        detail_row("Quantity", format!("{:.1}", sale.qty)),
-        detail_row("Price", money::format_paise(sale.price_paise)),
-        row![
-            text("Total").width(Length::Fixed(140.0)).size(18),
-            text(money::format_paise(total_paise)).size(18).font(theme::BOLD).color(theme::VIOLET),
-        ],
-        row![
-            button(text("Edit").size(15)).style(theme::primary_button).padding([10, 24]).on_press(Message::OpenSaleEdit(sale.id)),
-            button(text("Print").size(15)).style(theme::success_button).padding([10, 24]).on_press(Message::PrintSalePressed(sale.id)),
-            button(text("Download").size(15)).style(theme::secondary_button).padding([10, 24]).on_press(Message::DownloadSalePressed(sale.id)),
-            button(text("Back").size(15)).style(theme::secondary_button).padding([10, 24]).on_press(Message::CloseSaleView),
+/// One figure in the Details panel, as a filled tile that takes an equal
+/// share of the width — three of these read as a dashboard, where three
+/// bare label/value pairs read as a caption.
+fn stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
+    tile(label, value, 26.0, theme::VIOLET, theme::BOLD)
+}
+
+/// Same tile, but for a value that is words rather than a figure — a shelf
+/// name set at 26pt violet would shout louder than the numbers beside it
+/// and wrap out of its tile besides.
+fn stat_text<'a>(label: &'a str, value: String) -> Element<'a, Message> {
+    tile(label, value, theme::TEXT_HEADING, theme::INK, theme::SEMIBOLD)
+}
+
+fn tile<'a>(
+    label: &'a str,
+    value: String,
+    size: f32,
+    color: iced::Color,
+    font: iced::Font,
+) -> Element<'a, Message> {
+    container(
+        column![
+            text(label.to_uppercase()).size(theme::TEXT_CAPTION).color(theme::MUTED_TEXT),
+            text(value).size(size).font(font).color(color),
         ]
-        .spacing(theme::SPACE_MD),
-    ]
-    .spacing(theme::SPACE_MD)
-    .max_width(560);
-
-    container(container(body).style(theme::card).padding(theme::SPACE_LG))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(theme::SPACE_MD)
-        .align_x(iced::Alignment::Center)
-        .into()
+        .spacing(theme::SPACE_XS),
+    )
+    .style(theme::panel)
+    .padding(theme::SPACE_MD)
+    .width(Length::FillPortion(1))
+    .into()
 }
 
-fn detail_row<'a>(label: &'a str, value: String) -> Element<'a, Message> {
-    row![text(label).size(14).width(Length::Fixed(140.0)), text(value).size(14)].into()
+fn labeled<'a>(label: &'a str, widget: impl Into<Element<'a, Message>>) -> iced::widget::Column<'a, Message> {
+    column![text(label).size(theme::TEXT_SMALL).color(theme::MUTED_TEXT), widget.into()].spacing(theme::SPACE_XS)
 }
 
-fn labeled<'a>(label: &'a str, widget: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    column![text(label).size(13), widget.into()].spacing(4).into()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(id: i64, stock: f64, threshold: f64) -> Item {
+        Item {
+            id,
+            name: format!("Item {id}"),
+            buy_price_paise: 1000,
+            sell_price_paise: 2000,
+            stock_qty: stock,
+            unit: "piece".into(),
+            low_stock_threshold: threshold,
+            description: String::new(),
+            location: String::new(),
+            has_image: false,
+            gst_rate_bp: None,
+        }
+    }
+
+    #[test]
+    fn only_items_below_their_threshold_are_listed() {
+        let mut state = State::default();
+        state.items = vec![item(1, 2.0, 5.0), item(2, 9.0, 5.0), item(3, 0.0, 1.0)];
+
+        let (visible, _, _) = low_stock_page(&state);
+        let ids: Vec<i64> = visible.iter().map(|i| i.id).collect();
+        assert_eq!(ids, vec![1, 3]);
+    }
+
+    #[test]
+    fn low_stock_paginates() {
+        let mut state = State::default();
+        state.items = (0..25).map(|i| item(i, 0.0, 1.0)).collect();
+
+        let (visible, page, page_count) = low_stock_page(&state);
+        assert_eq!(visible.len(), PAGE_SIZE);
+        assert_eq!((page, page_count), (0, 3));
+
+        state.low_stock_page = 2;
+        let (visible, page, _) = low_stock_page(&state);
+        assert_eq!(visible.len(), 5);
+        assert_eq!(page, 2);
+    }
+
+    #[test]
+    fn a_stale_page_is_clamped_once_items_are_restocked() {
+        let mut state = State::default();
+        state.items = (0..25).map(|i| item(i, 0.0, 1.0)).collect();
+        state.low_stock_page = 2;
+
+        // Everything but one item gets restocked while the screen sits on
+        // page 3 — it must fall back to the only page there is.
+        state.items = vec![item(1, 0.0, 1.0)];
+        let (visible, page, page_count) = low_stock_page(&state);
+        assert_eq!(visible.len(), 1);
+        assert_eq!((page, page_count), (0, 1));
+    }
+
+    #[test]
+    fn an_empty_catalog_still_reports_one_page() {
+        let state = State::default();
+        let (visible, page, page_count) = low_stock_page(&state);
+        assert!(visible.is_empty());
+        assert_eq!((page, page_count), (0, 1));
+    }
 }

@@ -8,6 +8,7 @@ mod license;
 mod models;
 mod money;
 mod pdf;
+mod pin;
 mod repo;
 mod settings;
 mod ui;
