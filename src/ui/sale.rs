@@ -115,18 +115,27 @@ pub fn low_stock_page(state: &State) -> (&[Item], i64, i64) {
 // ----------------------------------------------------------------- view
 
 pub fn view(state: &State) -> Element<'_, Message> {
-    column![
-        text("Item Details").size(theme::TEXT_TITLE).font(theme::SEMIBOLD),
-        items_panel(state),
-        details_panel(state),
-        low_stock_panel(state),
-    ]
-    .spacing(theme::SPACE_MD)
-    // No top padding — the tab strip above already provides it. The
-    // bottom padding keeps the low-stock panel, which stretches to fill,
-    // off the window edge.
-    .padding(iced::Padding { top: 0.0, right: theme::SPACE_MD, bottom: theme::SPACE_MD, left: theme::SPACE_MD })
-    .width(Length::Fill)
+    // The whole page scrolls, and each panel takes the height its content
+    // needs.
+    //
+    // It used to be a fixed column with the low-stock panel set to fill
+    // whatever was left. On a short screen — a 1366x768 laptop, say —
+    // "whatever was left" came to nothing, so that panel drew its heading
+    // and its "1-10 of 14" line with no rows in between: the list was
+    // still there, allocated zero pixels. Scrolling the page instead means
+    // running out of room pushes content down rather than crushing it.
+    scrollable(
+        column![
+            text("Item Details").size(theme::TEXT_TITLE).font(theme::SEMIBOLD),
+            items_panel(state),
+            details_panel(state),
+            low_stock_panel(state),
+        ]
+        .spacing(theme::SPACE_MD)
+        // No top padding — the tab strip above already provides it.
+        .padding(iced::Padding { top: 0.0, right: theme::SPACE_MD, bottom: theme::SPACE_MD, left: theme::SPACE_MD })
+        .width(Length::Fill),
+    )
     .height(Length::Fill)
     .into()
 }
@@ -339,9 +348,10 @@ fn low_stock_panel(state: &State) -> Element<'_, Message> {
     container(
         column![
             header,
-            // The list scrolls inside the panel so the pagination row stays
-            // pinned to the bottom instead of sliding off the page.
-            scrollable(list).height(Length::Fill),
+            // Drawn at its natural height — a page is at most `PAGE_SIZE`
+            // rows, and the page itself scrolls. A nested scrollable here
+            // is what let the list collapse to nothing on a short window.
+            list,
             pagination,
         ]
         .spacing(theme::SPACE_MD),
@@ -349,7 +359,6 @@ fn low_stock_panel(state: &State) -> Element<'_, Message> {
     .style(theme::card)
     .padding(theme::SPACE_MD)
     .width(Length::Fill)
-    .height(Length::Fill)
     .into()
 }
 

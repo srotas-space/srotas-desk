@@ -134,13 +134,45 @@ fn write_entry(info: &std::panic::PanicHookInfo<'_>, backtrace: &Backtrace) {
         let _ = file.write_all(entry.as_bytes());
     }
 
-    // A graphics death is the one kind the app can do something about, so
-    // leave a note for the next launch to pick up.
+    // A graphics death is the one kind the app can do something about.
     if is_graphics_failure(&entry) {
         if let Some(marker) = renderer_marker() {
             let _ = std::fs::write(marker, env!("CARGO_PKG_VERSION"));
         }
+        relaunch_in_software_mode();
     }
+}
+
+/// Environment flag marking a process that is already the retry. Its only
+/// job is to stop a machine that fails both ways from spawning itself
+/// forever.
+const RELAUNCH_GUARD: &str = "SROTAS_DESK_RELAUNCHED";
+
+/// Starts a fresh copy of the app in software rendering, then lets this
+/// one finish dying.
+///
+/// Without this the marker written above only helps on the *next* launch,
+/// which means the first run on an affected machine is a window that
+/// flashes and vanishes. Most people read that as "broken" and never open
+/// it a second time. Relaunching turns it into a flicker followed by a
+/// working app.
+///
+/// Guarded twice over: it only fires when this process was using the GPU
+/// (`ICED_BACKEND` unset) and was not itself a retry. A machine that fails
+/// in software too therefore dies once, quietly, rather than spawning
+/// processes in a loop.
+fn relaunch_in_software_mode() {
+    if std::env::var_os(RELAUNCH_GUARD).is_some() || std::env::var_os("ICED_BACKEND").is_some() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+
+    let _ = std::process::Command::new(exe)
+        .env("ICED_BACKEND", "tiny-skia")
+        .env(RELAUNCH_GUARD, "1")
+        .spawn();
 }
 
 #[cfg(test)]
@@ -158,6 +190,21 @@ mod tests {
     fn recognises_an_adapter_that_never_arrived() {
         assert!(is_graphics_failure("called `Option::unwrap()` on a `None` value: no suitable adapter found"));
         assert!(is_graphics_failure("NoAvailableAdapter"));
+    }
+
+    /// The guard that keeps a doubly-broken machine from spawning copies
+    /// of itself without end.
+    #[test]
+    fn a_retry_process_never_relaunches_again() {
+        // Both conditions are checked independently, so either one alone
+        // stops the chain.
+        unsafe { std::env::set_var(RELAUNCH_GUARD, "1") };
+        relaunch_in_software_mode(); // must be a no-op, not a spawn
+        unsafe { std::env::remove_var(RELAUNCH_GUARD) };
+
+        unsafe { std::env::set_var("ICED_BACKEND", "tiny-skia") };
+        relaunch_in_software_mode(); // likewise
+        unsafe { std::env::remove_var("ICED_BACKEND") };
     }
 
     #[test]

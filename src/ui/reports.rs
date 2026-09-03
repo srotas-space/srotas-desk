@@ -349,21 +349,25 @@ pub fn view(state: &State) -> Element<'_, Message> {
                 text("Transaction History").size(theme::TEXT_HEADING).font(theme::SEMIBOLD),
                 iced::widget::space::horizontal(),
             ],
-            scrollable(history).height(Length::Fill),
+            // Its natural height — a page is at most `PAGE_SIZE` rows, and
+            // the page below scrolls. Same reasoning as the low-stock
+            // panel on Shop → Details: a scrollable set to fill inside a
+            // fixed column gets nothing when the window is short, and the
+            // list silently draws no rows at all.
+            history,
             pagination,
         ]
         .spacing(theme::SPACE_MD),
     )
     .style(theme::card)
-    .padding(theme::SPACE_MD)
-    .height(Length::Fill);
+    .padding(theme::SPACE_MD);
 
-    container(
+    scrollable(
         column![container(filters).style(theme::card).padding(theme::SPACE_MD), summary, table]
             .spacing(theme::SPACE_MD)
-            .padding([0, theme::SPACE_MD as u16]),
+            .padding([0, theme::SPACE_MD as u16])
+            .width(Length::Fill),
     )
-    .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }

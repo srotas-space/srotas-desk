@@ -111,6 +111,18 @@ fn decode_payload(bytes: &[u8]) -> Result<DecodedPayload, LicenseError> {
 /// `expected_device_id`, and checks it hasn't expired as of `now`.
 /// Exposed separately from `verify` so tests can exercise this against a
 /// throwaway keypair instead of the real embedded one.
+/// Strips every space, tab, newline and carriage return from a pasted key.
+///
+/// Base64 contains none of those, so removing them can only help — and it
+/// is needed far more often than it looks. A key is ~150 characters, which
+/// wraps when it is shown on a web page or sent in an email, and the line
+/// breaks come along with the copy. Trimming the ends alone leaves a
+/// newline sitting in the middle, the decode fails, and the shopkeeper is
+/// told their perfectly good key "doesn't look valid".
+fn strip_whitespace(key_text: &str) -> String {
+    key_text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 fn verify_with_key(
     key_text: &str,
     expected_device_id: &str,
@@ -118,7 +130,7 @@ fn verify_with_key(
     verifying_key: &VerifyingKey,
 ) -> Result<LicensePayload, LicenseError> {
     let raw = base64::engine::general_purpose::STANDARD
-        .decode(key_text.trim())
+        .decode(strip_whitespace(key_text))
         .map_err(|_| LicenseError::InvalidFormat)?;
     if raw.len() < 64 {
         return Err(LicenseError::InvalidFormat);
@@ -248,6 +260,44 @@ mod tests {
 
         let err = verify_with_key(&key, "device-a", Utc::now(), &verifying_key).unwrap_err();
         assert!(matches!(err, LicenseError::BadSignature));
+    }
+
+    /// The failure a shopkeeper actually hits: a key copied out of a web
+    /// page or an email, carrying the line breaks it was wrapped with.
+    #[test]
+    fn accepts_a_key_that_was_wrapped_when_it_was_copied() {
+        let (signing_key, verifying_key) = test_keypair();
+        let key = sign_test_key(&signing_key, "device-a", "Test Shop", Utc::now(), None);
+
+        // Wrapped every 40 characters, the way a narrow column would.
+        let wrapped: String =
+            key.as_bytes().chunks(40).map(|c| String::from_utf8_lossy(c).to_string()).collect::<Vec<_>>().join("\n");
+        assert!(wrapped.contains('\n'), "the fixture must actually be wrapped");
+        assert!(verify_with_key(&wrapped, "device-a", Utc::now(), &verifying_key).is_ok());
+
+        // Windows clipboards bring CRLF; some mail clients add spaces.
+        let crlf = key.as_bytes().chunks(40).map(|c| String::from_utf8_lossy(c).to_string()).collect::<Vec<_>>().join("\r\n");
+        assert!(verify_with_key(&crlf, "device-a", Utc::now(), &verifying_key).is_ok());
+        assert!(verify_with_key(&format!("  {key}  "), "device-a", Utc::now(), &verifying_key).is_ok());
+    }
+
+    /// Proves the real published key fails the *old* way and passes the
+    /// new one — i.e. that wrapping is genuinely the reported failure and
+    /// not a guess.
+    #[test]
+    fn the_published_key_survives_being_wrapped() {
+        const KEY: &str = "AR9XD6WnnkgUjtaPDg2Xy3QAAAtTcm90YXMgRGVzawAAAABqj8WdAAAAAAAAAABlosBH6RDtxjB1orI7noaUIoU2i3bnJFSvVdp7Bu7PglyFkOZXzbtpVNFhSSKlVTTfUgDqCmvwab/5FQ07dA4L";
+        let wrapped: String =
+            KEY.as_bytes().chunks(64).map(|c| String::from_utf8_lossy(c).to_string()).collect::<Vec<_>>().join("\n");
+
+        // What the old code did — trim the ends only — still fails.
+        assert!(
+            base64::engine::general_purpose::STANDARD.decode(wrapped.trim()).is_err(),
+            "a wrapped key must fail an ends-only trim, or this test proves nothing"
+        );
+
+        // What it does now succeeds.
+        assert!(verify(&wrapped, "any-device", Utc::now()).is_ok());
     }
 
     #[test]
